@@ -4,6 +4,7 @@ use crate::{
 };
 use rbx_dom_weak::{Instance, WeakDom, types::Ref};
 use rbx_types::{CFrame, Variant, Vector3};
+use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::HashMap,
@@ -12,15 +13,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub(crate) struct ModelAsset {
     pub name: String,
     pub primitives: Vec<ModelPrimitive>,
     pub extras: Value,
     pub warnings: Vec<String>,
+    pub asset_ids: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub(crate) struct ModelPrimitive {
     pub name: String,
     pub mesh: UnionMesh,
@@ -29,7 +31,7 @@ pub(crate) struct ModelPrimitive {
     pub extras: Value,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct ModelMaterial {
     pub name: String,
     pub color: [f32; 4],
@@ -168,6 +170,7 @@ fn parse_model(
 
     let mut primitives = Vec::new();
     let mut warnings = Vec::new();
+    let mut asset_ids = Vec::new();
     for geometry_ref in geometry_refs {
         let instance = dom
             .get_by_ref(geometry_ref)
@@ -181,9 +184,13 @@ fn parse_model(
                 {
                     let special_mesh = dom.get_by_ref(special_mesh_ref).expect("valid child ref");
                     if let Some(asset_id) = metadata::property_asset_id(special_mesh, "MeshId") {
+                        asset_ids.push(asset_id.clone());
                         material.base_color_asset =
                             metadata::property_asset_id(special_mesh, "TextureId")
                                 .or_else(|| metadata::property_asset_id(special_mesh, "TextureID"));
+                        if let Some(asset_id) = &material.base_color_asset {
+                            asset_ids.push(asset_id.clone());
+                        }
                         match load_mesh(&asset_id, download_dir, mesh_dir, mesh_cache) {
                             Ok(mut mesh) => {
                                 apply_special_mesh_transform(&mut mesh, special_mesh);
@@ -208,6 +215,7 @@ fn parse_model(
                     .or_else(|| metadata::property_asset_id(instance, "MeshContent"));
                 match mesh_id {
                     Some(asset_id) => {
+                        asset_ids.push(asset_id.clone());
                         match load_mesh(&asset_id, download_dir, mesh_dir, mesh_cache) {
                             Ok(mut mesh) => {
                                 apply_instance_size(&mut mesh, instance);
@@ -226,16 +234,19 @@ fn parse_model(
                 }
             }
             "UnionOperation" => match metadata::property_asset_id(instance, "AssetId") {
-                Some(asset_id) => match load_mesh(&asset_id, download_dir, mesh_dir, mesh_cache) {
-                    Ok(mut mesh) => {
-                        apply_instance_size(&mut mesh, instance);
-                        Some(mesh)
+                Some(asset_id) => {
+                    asset_ids.push(asset_id.clone());
+                    match load_mesh(&asset_id, download_dir, mesh_dir, mesh_cache) {
+                        Ok(mut mesh) => {
+                            apply_instance_size(&mut mesh, instance);
+                            Some(mesh)
+                        }
+                        Err(error) => {
+                            warnings.push(format!("{} ({}): {error}", instance.name, asset_id));
+                            None
+                        }
                     }
-                    Err(error) => {
-                        warnings.push(format!("{} ({}): {error}", instance.name, asset_id));
-                        None
-                    }
-                },
+                }
                 None => {
                     warnings.push(format!("{}: UnionOperation has no AssetId", instance.name));
                     None
@@ -254,6 +265,12 @@ fn parse_model(
                 .or_else(|| material.base_color_asset.clone());
             material.normal_asset = metadata::property_asset_id(surface_appearance, "NormalMap");
         }
+        if let Some(asset_id) = &material.base_color_asset {
+            asset_ids.push(asset_id.clone());
+        }
+        if let Some(asset_id) = &material.normal_asset {
+            asset_ids.push(asset_id.clone());
+        }
 
         if let Some(mesh) = mesh {
             primitives.push(ModelPrimitive {
@@ -266,11 +283,14 @@ fn parse_model(
         }
     }
 
+    asset_ids.sort();
+    asset_ids.dedup();
     Ok(ModelAsset {
         name: root.name.clone(),
         primitives,
         extras: model_extras,
         warnings,
+        asset_ids,
     })
 }
 

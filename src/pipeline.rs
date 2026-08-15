@@ -4,13 +4,14 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
 
 const MODEL_FORMAT_VERSION: u32 = 1;
+const MISSING_DEPENDENCY_HASH: &str = "<missing>";
 
 #[derive(Debug)]
 pub(crate) struct ModelReport {
@@ -40,7 +41,7 @@ struct ModelManifest {
     version: u32,
     studs_per_tile: f32,
     includes_materials: bool,
-    dependency_fingerprint: String,
+    dependencies: BTreeMap<String, String>,
     sources: Vec<ModelSourceManifestEntry>,
     models: Vec<ModelManifestEntry>,
 }
@@ -57,6 +58,7 @@ pub(crate) struct ModelManifestEntry {
 struct ModelSourceManifestEntry {
     source: String,
     hash: String,
+    dependencies: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -65,7 +67,7 @@ struct FingerprintCache {
     files: HashMap<String, FingerprintCacheEntry>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct FingerprintCacheEntry {
     length: u64,
     modified_nanos: Option<u128>,
@@ -102,30 +104,16 @@ pub(crate) fn export_models(
         .into_iter()
         .map(|path| absolute_path(&path))
         .collect::<Result<Vec<_>, _>>()?;
-    let dependency_fingerprint = tree_fingerprint(
-        &download_dir,
-        &assets_dir,
-        &mesh_dir.join("fingerprint.json"),
-    )?;
-    let source_entries = source_manifest_entries(&source_files);
-    if let Some(source_entries) = &source_entries
-        && let Some(models) = reusable_models(
-            &output_dir,
-            &dependency_fingerprint,
-            source_entries,
-            studs_per_tile,
-            includes_materials,
-        )
-    {
-        return Ok(ModelReport {
-            exported: 0,
-            cached: models.len(),
-            failed: Vec::new(),
-            models,
-            output_directory: output_dir,
-        });
-    }
+    let source_entries = source_manifest_entries(&source_files).unwrap_or_default();
+    let source_hashes = source_entries
+        .iter()
+        .map(|entry| (entry.source.clone(), entry.hash.clone()))
+        .collect::<HashMap<_, _>>();
+    let previous_manifest = reusable_manifest(&output_dir, studs_per_tile, includes_materials);
+    let mut fingerprints = FingerprintState::load(&mesh_dir.join("fingerprint.json"));
     let mut manifest_entries = Vec::new();
+    let mut manifest_dependencies = BTreeMap::new();
+    let mut manifest_sources = Vec::new();
     let mut report = ModelReport {
         exported: 0,
         cached: 0,
@@ -135,6 +123,29 @@ pub(crate) fn export_models(
     };
 
     for source_path in source_files {
+        let source = source_path.display().to_string();
+        if let Some(source_hash) = source_hashes.get(&source)
+            && let Some(previous_manifest) = &previous_manifest
+            && let Some((models, dependencies)) = reusable_source_models(
+                previous_manifest,
+                &source,
+                source_hash,
+                &mut fingerprints,
+                &output_dir,
+            )
+        {
+            manifest_dependencies.extend(dependencies.clone());
+            manifest_sources.push(ModelSourceManifestEntry {
+                source,
+                hash: source_hash.clone(),
+                dependencies: dependencies.keys().cloned().collect(),
+            });
+            report.cached += models.len();
+            manifest_entries.extend(models.iter().cloned());
+            report.models.extend(models);
+            continue;
+        }
+
         let source_bytes = match fs::read(&source_path) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -156,14 +167,34 @@ pub(crate) fn export_models(
                     continue;
                 }
             };
+        let dependencies = source_dependencies(
+            &models,
+            &download_dir,
+            &assets_dir,
+            includes_materials,
+            &mut fingerprints,
+        )?;
+        if let Some(source_hash) = source_hashes.get(&source) {
+            manifest_dependencies.extend(dependencies.clone());
+            manifest_sources.push(ModelSourceManifestEntry {
+                source: source.clone(),
+                hash: source_hash.clone(),
+                dependencies: dependencies.keys().cloned().collect(),
+            });
+        }
         for (model_index, model_asset) in models.into_iter().enumerate() {
             let model_hash = model_fingerprint(
                 &source_bytes,
-                &dependency_fingerprint,
                 &model_asset,
                 model_index,
                 studs_per_tile,
-            );
+                ModelFingerprintContext {
+                    download_dir: &download_dir,
+                    assets_dir: &assets_dir,
+                    includes_materials,
+                    fingerprints: &mut fingerprints,
+                },
+            )?;
             let output_stem = model_output_stem(&model_hash, includes_materials);
             let output_name = format!("{output_stem}.gltf");
             let output_path = output_dir.join(&output_name);
@@ -235,14 +266,15 @@ pub(crate) fn export_models(
         version: MODEL_FORMAT_VERSION,
         studs_per_tile,
         includes_materials,
-        dependency_fingerprint,
-        sources: source_entries.unwrap_or_default(),
+        dependencies: manifest_dependencies,
+        sources: manifest_sources,
         models: manifest_entries,
     };
     let manifest = serde_json::to_string_pretty(&manifest)
         .map_err(|error| format!("failed to serialize model manifest: {error}"))?;
     fs::write(output_dir.join("manifest.json"), format!("{manifest}\n"))
         .map_err(|error| format!("failed to write model manifest: {error}"))?;
+    fingerprints.write(&mesh_dir.join("fingerprint.json"));
 
     Ok(report)
 }
@@ -322,20 +354,30 @@ fn absolute_path(path: &Path) -> Result<PathBuf, String> {
 
 fn model_fingerprint(
     source_bytes: &[u8],
-    dependency_fingerprint: &str,
     model: &ModelAsset,
     model_index: usize,
     studs_per_tile: f32,
-) -> String {
+    context: ModelFingerprintContext<'_>,
+) -> Result<String, String> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(format!("roform-model-v{MODEL_FORMAT_VERSION}").as_bytes());
     hasher.update(source_bytes);
-    hasher.update(dependency_fingerprint.as_bytes());
-    hasher.update(model.name.as_bytes());
+    let model_bytes = serde_json::to_vec(model)
+        .map_err(|error| format!("failed to serialize model for cache fingerprint: {error}"))?;
+    hasher.update(&model_bytes);
     hasher.update(model_index.to_string().as_bytes());
-    hasher.update(model.primitives.len().to_string().as_bytes());
     hasher.update(&studs_per_tile.to_le_bytes());
-    hasher.finalize().to_hex().to_string()
+    hasher.update(&[context.includes_materials as u8]);
+    for path in model_dependency_paths(
+        model,
+        context.download_dir,
+        context.assets_dir,
+        context.includes_materials,
+    ) {
+        hasher.update(path.to_string_lossy().as_bytes());
+        hasher.update(context.fingerprints.fingerprint(&path)?.as_bytes());
+    }
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 fn model_output_stem(model_hash: &str, includes_materials: bool) -> String {
@@ -351,31 +393,62 @@ fn source_manifest_entries(paths: &[PathBuf]) -> Option<Vec<ModelSourceManifestE
             Some(ModelSourceManifestEntry {
                 source: path.display().to_string(),
                 hash: blake3::hash(&bytes).to_hex().to_string(),
+                dependencies: Vec::new(),
             })
         })
         .collect()
 }
 
-fn reusable_models(
+fn reusable_manifest(
     output_dir: &Path,
-    dependency_fingerprint: &str,
-    sources: &[ModelSourceManifestEntry],
     studs_per_tile: f32,
     includes_materials: bool,
-) -> Option<Vec<ModelManifestEntry>> {
+) -> Option<ModelManifest> {
     let manifest_bytes = fs::read(output_dir.join("manifest.json")).ok()?;
     let manifest: ModelManifest = serde_json::from_slice(&manifest_bytes).ok()?;
     if manifest.version != MODEL_FORMAT_VERSION
         || manifest.studs_per_tile != studs_per_tile
         || manifest.includes_materials != includes_materials
-        || manifest.dependency_fingerprint != dependency_fingerprint
-        || manifest.sources != sources
     {
         return None;
     }
+    Some(manifest)
+}
+
+fn reusable_source_models(
+    manifest: &ModelManifest,
+    source: &str,
+    source_hash: &str,
+    fingerprints: &mut FingerprintState,
+    output_dir: &Path,
+) -> Option<(Vec<ModelManifestEntry>, BTreeMap<String, String>)> {
+    let source_manifest = manifest
+        .sources
+        .iter()
+        .find(|entry| entry.source == source && entry.hash == source_hash)?;
+    let dependencies = source_manifest
+        .dependencies
+        .iter()
+        .map(|path| Some((path.clone(), manifest.dependencies.get(path)?.clone())))
+        .collect::<Option<BTreeMap<_, _>>>()?;
+    for (path, expected_hash) in &dependencies {
+        let hash = fingerprints.fingerprint(Path::new(path)).ok()?;
+        if hash != *expected_hash {
+            return None;
+        }
+    }
 
     let buffer_dir = output_dir.parent().unwrap_or(output_dir).join("bin");
-    if manifest.models.iter().all(|model| {
+    let models = manifest
+        .models
+        .iter()
+        .filter(|model| model.source == source)
+        .cloned()
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        return None;
+    }
+    if models.iter().all(|model| {
         let Some(output_stem) = Path::new(&model.output)
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -385,34 +458,110 @@ fn reusable_models(
         Path::new(&model.output).is_file()
             && buffer_dir.join(format!("{output_stem}.bin")).is_file()
     }) {
-        Some(manifest.models)
+        Some((models, dependencies))
     } else {
         None
     }
 }
 
-fn tree_fingerprint(first: &Path, second: &Path, cache_path: &Path) -> Result<String, String> {
-    let mut files = Vec::new();
-    collect_files(first, &mut files)?;
-    collect_files(second, &mut files)?;
-    files.sort();
+fn source_dependencies(
+    models: &[ModelAsset],
+    download_dir: &Path,
+    assets_dir: &Path,
+    includes_materials: bool,
+    fingerprints: &mut FingerprintState,
+) -> Result<BTreeMap<String, String>, String> {
+    let mut paths = HashSet::new();
+    for model in models {
+        paths.extend(model_dependency_paths(
+            model,
+            download_dir,
+            assets_dir,
+            includes_materials,
+        ));
+    }
+    let mut paths = paths.into_iter().collect::<Vec<_>>();
+    paths.sort();
+    let mut dependencies = BTreeMap::new();
+    for path in paths {
+        let hash = fingerprints.fingerprint(&path)?;
+        dependencies.insert(path.display().to_string(), hash);
+    }
+    Ok(dependencies)
+}
 
-    let previous_cache = fs::read(cache_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<FingerprintCache>(&bytes).ok())
-        .filter(|cache| cache.version == 1);
-    let mut current_cache = HashMap::with_capacity(files.len());
-    let mut hasher = blake3::Hasher::new();
-    for path in files {
+fn model_dependency_paths(
+    model: &ModelAsset,
+    download_dir: &Path,
+    assets_dir: &Path,
+    includes_materials: bool,
+) -> Vec<PathBuf> {
+    let mut paths = HashSet::new();
+    for asset_id in &model.asset_ids {
+        let asset_dir = download_dir.join(asset_id);
+        paths.insert(asset_dir.join("asset.bin"));
+        paths.insert(asset_dir.join("asset.rbxm"));
+    }
+    if includes_materials {
+        for primitive in &model.primitives {
+            let material_dir = assets_dir.join("material");
+            paths.insert(material_dir.join(format!("{}_color.png", primitive.material.name)));
+            paths.insert(material_dir.join(format!("{}_normal.png", primitive.material.name)));
+        }
+    }
+    let mut paths = paths.into_iter().collect::<Vec<_>>();
+    paths.sort();
+    paths
+}
+
+struct FingerprintState {
+    previous: Option<FingerprintCache>,
+    current: HashMap<String, FingerprintCacheEntry>,
+}
+
+struct ModelFingerprintContext<'a> {
+    download_dir: &'a Path,
+    assets_dir: &'a Path,
+    includes_materials: bool,
+    fingerprints: &'a mut FingerprintState,
+}
+
+impl FingerprintState {
+    fn load(cache_path: &Path) -> Self {
+        let previous = fs::read(cache_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<FingerprintCache>(&bytes).ok())
+            .filter(|cache| cache.version == MODEL_FORMAT_VERSION);
+        Self {
+            previous,
+            current: HashMap::new(),
+        }
+    }
+
+    fn fingerprint(&mut self, path: &Path) -> Result<String, String> {
         let path_string = path.to_string_lossy().into_owned();
-        let metadata = fs::metadata(&path)
-            .map_err(|error| format!("failed to inspect dependency {}: {error}", path.display()))?;
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => {
+                return Ok(MISSING_DEPENDENCY_HASH.to_owned());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(MISSING_DEPENDENCY_HASH.to_owned());
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect dependency {}: {error}",
+                    path.display()
+                ));
+            }
+        };
         let modified_nanos = metadata
             .modified()
             .ok()
             .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
             .map(|duration| duration.as_nanos());
-        let hash = if let Some(entry) = previous_cache
+        let hash = if let Some(entry) = self
+            .previous
             .as_ref()
             .and_then(|cache| cache.files.get(&path_string))
             .filter(|entry| {
@@ -422,61 +571,178 @@ fn tree_fingerprint(first: &Path, second: &Path, cache_path: &Path) -> Result<St
             }) {
             entry.hash.clone()
         } else {
-            let bytes = fs::read(&path).map_err(|error| {
+            let bytes = fs::read(path).map_err(|error| {
                 format!("failed to read dependency {}: {error}", path.display())
             })?;
             blake3::hash(&bytes).to_hex().to_string()
         };
-
-        hasher.update(path_string.as_bytes());
-        hasher.update(hash.as_bytes());
-        current_cache.insert(
+        self.current.insert(
             path_string,
             FingerprintCacheEntry {
                 length: metadata.len(),
                 modified_nanos,
-                hash,
+                hash: hash.clone(),
             },
         );
+        Ok(hash)
     }
 
-    let cache = FingerprintCache {
-        version: 1,
-        files: current_cache,
-    };
-    if let Ok(bytes) = serde_json::to_vec(&cache)
-        && let Err(error) = fs::write(cache_path, bytes)
-    {
-        eprintln!(
-            "warning: failed to write dependency fingerprint cache {}: {error}",
-            cache_path.display()
-        );
+    fn write(&self, cache_path: &Path) {
+        let cache = FingerprintCache {
+            version: MODEL_FORMAT_VERSION,
+            files: self.current.clone(),
+        };
+        if let Ok(bytes) = serde_json::to_vec(&cache)
+            && let Err(error) = fs::write(cache_path, bytes)
+        {
+            eprintln!(
+                "warning: failed to write dependency fingerprint cache {}: {error}",
+                cache_path.display()
+            );
+        }
     }
-    Ok(hasher.finalize().to_hex().to_string())
 }
 
-fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
-    if path.is_file() {
-        files.push(path.to_owned());
-        return Ok(());
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn reuses_a_source_independently_of_other_manifest_sources() {
+        let root = std::env::temp_dir().join(format!(
+            "roform-pipeline-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let model_dir = root.join("model");
+        let buffer_dir = root.join("bin");
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::create_dir_all(&buffer_dir).unwrap();
+        fs::write(model_dir.join("a.gltf"), b"{}").unwrap();
+        fs::write(buffer_dir.join("a.bin"), b"").unwrap();
+
+        let manifest = ModelManifest {
+            version: MODEL_FORMAT_VERSION,
+            studs_per_tile: 1.0,
+            includes_materials: true,
+            dependencies: BTreeMap::new(),
+            sources: vec![
+                ModelSourceManifestEntry {
+                    source: "a.rbxmx".to_owned(),
+                    hash: "a".to_owned(),
+                    dependencies: Vec::new(),
+                },
+                ModelSourceManifestEntry {
+                    source: "b.rbxmx".to_owned(),
+                    hash: "b".to_owned(),
+                    dependencies: Vec::new(),
+                },
+            ],
+            models: vec![ModelManifestEntry {
+                hash: "a".to_owned(),
+                output: model_dir.join("a.gltf").display().to_string(),
+                source: "a.rbxmx".to_owned(),
+                name: "A".to_owned(),
+            }],
+        };
+        let mut fingerprints = FingerprintState {
+            previous: None,
+            current: HashMap::new(),
+        };
+
+        let reused =
+            reusable_source_models(&manifest, "a.rbxmx", "a", &mut fingerprints, &model_dir)
+                .unwrap();
+        assert_eq!(reused.0.len(), 1);
+        assert_eq!(reused.0[0].source, "a.rbxmx");
+
+        fs::remove_dir_all(root).unwrap();
     }
-    if !path.is_dir() {
-        return Ok(());
-    }
-    let entries = fs::read_dir(path).map_err(|error| {
-        format!(
-            "failed to read dependency directory {}: {error}",
-            path.display()
+
+    #[test]
+    fn keeps_cached_models_in_the_manifest_for_the_next_run() {
+        let root = std::env::temp_dir().join(format!(
+            "roform-pipeline-manifest-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let input_dir = root.join("input");
+        fs::create_dir_all(&input_dir).unwrap();
+        fs::write(
+            input_dir.join("model.rbxmx"),
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/fixtures/PRIMITIVES - hut.rbxmx"
+            )),
         )
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            format!(
-                "failed to inspect dependency directory {}: {error}",
-                path.display()
-            )
-        })?;
-        collect_files(&entry.path(), files)?;
+        .unwrap();
+        fs::write(
+            input_dir.join("model-copy.rbxmx"),
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/fixtures/PRIMITIVES - hut.rbxmx"
+            )),
+        )
+        .unwrap();
+
+        let first = export_models(
+            &input_dir,
+            &root.join("download"),
+            &root.join("mesh"),
+            &root.join("assets"),
+            &root.join("model"),
+            1.0,
+            true,
+        )
+        .unwrap();
+        assert!(!first.models.is_empty());
+        let manifest_bytes = fs::read(root.join("model").join("manifest.json")).unwrap();
+        let manifest: ModelManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+        assert_eq!(manifest.sources.len(), 2);
+        let source_dependencies = &manifest.sources[0].dependencies;
+        assert!(!source_dependencies.is_empty());
+        assert!(manifest.sources.iter().all(|source| {
+            source.dependencies == *source_dependencies
+                && source
+                    .dependencies
+                    .iter()
+                    .all(|path| manifest.dependencies.contains_key(path))
+        }));
+        assert_eq!(manifest.dependencies.len(), source_dependencies.len());
+
+        let second = export_models(
+            &input_dir,
+            &root.join("download"),
+            &root.join("mesh"),
+            &root.join("assets"),
+            &root.join("model"),
+            1.0,
+            true,
+        )
+        .unwrap();
+        assert_eq!(second.exported, 0);
+        assert_eq!(second.cached, first.models.len());
+
+        let third = export_models(
+            &input_dir,
+            &root.join("download"),
+            &root.join("mesh"),
+            &root.join("assets"),
+            &root.join("model"),
+            1.0,
+            true,
+        )
+        .unwrap();
+        assert_eq!(third.exported, 0);
+        assert_eq!(third.cached, first.models.len());
+
+        fs::remove_dir_all(root).unwrap();
     }
-    Ok(())
 }

@@ -676,6 +676,7 @@ mod tests {
                 "properties": { "PrimaryPart": { "Ref": "none" } }
             }),
             warnings: Vec::new(),
+            asset_ids: Vec::new(),
         };
 
         let gltf = model_to_gltf(

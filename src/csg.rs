@@ -3,6 +3,7 @@ use rbx_mesh::{
     read_mesh_versioned, read_union_graphics_versioned,
     union_graphics::UnionGraphics,
 };
+use serde::Serialize;
 use std::{io::Cursor, ops::Range};
 use thiserror::Error;
 
@@ -13,7 +14,7 @@ const CACHED_MESH_MAGIC: &[u8] = b"ROFMESH1";
 const CACHED_MESH_HEADER_LENGTH: usize = CACHED_MESH_MAGIC.len() + 8;
 const CACHED_VERTEX_LENGTH: usize = 36;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct UnionVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
@@ -21,7 +22,7 @@ pub(crate) struct UnionVertex {
     pub color: [u8; 4],
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct UnionMesh {
     pub vertices: Vec<UnionVertex>,
     pub indices: Vec<u32>,
