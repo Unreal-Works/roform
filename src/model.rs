@@ -459,8 +459,7 @@ fn box_mesh(size: Vector3) -> UnionMesh {
 
 fn cylinder_mesh(size: Vector3) -> UnionMesh {
     let segments = 24usize;
-    let radius_x = size.z.abs() * 0.5;
-    let radius_z = size.y.abs() * 0.5;
+    let radius = size.y.abs().min(size.z.abs()) * 0.5;
     let half_height = size.x.abs() * 0.5;
 
     let mut mesh = UnionMesh {
@@ -481,18 +480,10 @@ fn cylinder_mesh(size: Vector3) -> UnionMesh {
         add_face(
             &mut mesh,
             [
-                [half_height, radius_x * current[0], radius_z * current[1]],
-                [
-                    half_height,
-                    radius_x * following[0],
-                    radius_z * following[1],
-                ],
-                [
-                    -half_height,
-                    radius_x * following[0],
-                    radius_z * following[1],
-                ],
-                [-half_height, radius_x * current[0], radius_z * current[1]],
+                [half_height, radius * current[0], radius * current[1]],
+                [half_height, radius * following[0], radius * following[1]],
+                [-half_height, radius * following[0], radius * following[1]],
+                [-half_height, radius * current[0], radius * current[1]],
             ],
             [0.0, current[0], current[1]],
         );
@@ -508,17 +499,13 @@ fn cylinder_mesh(size: Vector3) -> UnionMesh {
                 color: [255; 4],
             },
             UnionVertex {
-                position: [
-                    -half_height,
-                    radius_x * following[0],
-                    radius_z * following[1],
-                ],
+                position: [-half_height, radius * following[0], radius * following[1]],
                 normal: [-1.0, 0.0, 0.0],
                 tex_coord: [following[0] * 0.5 + 0.5, following[1] * 0.5 + 0.5],
                 color: [255; 4],
             },
             UnionVertex {
-                position: [-half_height, radius_x * current[0], radius_z * current[1]],
+                position: [-half_height, radius * current[0], radius * current[1]],
                 normal: [-1.0, 0.0, 0.0],
                 tex_coord: [current[0] * 0.5 + 0.5, current[1] * 0.5 + 0.5],
                 color: [255; 4],
@@ -537,17 +524,13 @@ fn cylinder_mesh(size: Vector3) -> UnionMesh {
                 color: [255; 4],
             },
             UnionVertex {
-                position: [half_height, radius_x * current[0], radius_z * current[1]],
+                position: [half_height, radius * current[0], radius * current[1]],
                 normal: [1.0, 0.0, 0.0],
                 tex_coord: [current[0] * 0.5 + 0.5, current[1] * 0.5 + 0.5],
                 color: [255; 4],
             },
             UnionVertex {
-                position: [
-                    half_height,
-                    radius_x * following[0],
-                    radius_z * following[1],
-                ],
+                position: [half_height, radius * following[0], radius * following[1]],
                 normal: [1.0, 0.0, 0.0],
                 tex_coord: [following[0] * 0.5 + 0.5, following[1] * 0.5 + 0.5],
                 color: [255; 4],
