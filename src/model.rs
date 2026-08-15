@@ -2,8 +2,8 @@ use crate::{
     csg::{UnionMesh, UnionVertex},
     decode_mesh_payload,
 };
-use rbx_dom_weak::{types::Ref, Instance, WeakDom};
-use rbx_types::{CFrame, Vector3, Variant};
+use rbx_dom_weak::{Instance, WeakDom, types::Ref};
+use rbx_types::{CFrame, Variant, Vector3};
 use std::{
     collections::HashMap,
     fs,
@@ -177,7 +177,9 @@ fn parse_model(
             }
             "MeshPart" => {
                 material.base_color_asset = property_asset_id(instance, "TextureID");
-                match property_asset_id(instance, "MeshId") {
+                let mesh_id = property_asset_id(instance, "MeshId")
+                    .or_else(|| property_asset_id(instance, "MeshContent"));
+                match mesh_id {
                     Some(asset_id) => match load_mesh(&asset_id, download_dir, mesh_cache) {
                         Ok(mesh) => Some(mesh),
                         Err(error) => {
@@ -243,11 +245,44 @@ fn load_mesh(
     }
 
     let payload_path = download_dir.join(asset_id).join("asset.bin");
-    let result = fs::read(&payload_path)
-        .map_err(|error| format!("failed to read {}: {error}", payload_path.display()))
-        .and_then(|bytes| decode_mesh_payload(&bytes));
+    let result = if payload_path.is_file() {
+        fs::read(&payload_path)
+            .map_err(|error| format!("failed to read {}: {error}", payload_path.display()))
+            .and_then(|bytes| decode_mesh_payload(&bytes))
+    } else {
+        let package_path = download_dir.join(asset_id).join("asset.rbxm");
+        if package_path.is_file() {
+            load_packaged_mesh(&package_path)
+        } else {
+            fs::read(&payload_path)
+                .map_err(|error| format!("failed to read {}: {error}", payload_path.display()))
+                .and_then(|bytes| decode_mesh_payload(&bytes))
+        }
+    };
     cache.insert(asset_id.to_owned(), result.clone());
     result
+}
+
+fn load_packaged_mesh(path: &Path) -> Result<UnionMesh, String> {
+    let file = fs::File::open(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let dom = rbx_binary::from_reader(file)
+        .map_err(|error| format!("failed to decode {}: {error}", path.display()))?;
+    let mesh_data = dom
+        .descendants()
+        .filter(|instance| instance.class.as_str() == "PartOperationAsset")
+        .find_map(|instance| {
+            instance
+                .properties
+                .get(&"MeshData".into())
+                .and_then(|value| match value {
+                    Variant::BinaryString(data) => Some(data.as_ref()),
+                    _ => None,
+                })
+        })
+        .ok_or_else(|| format!("{} contains no PartOperationAsset MeshData", path.display()))?;
+    decode_mesh_payload(mesh_data)
+        .map_err(|error| format!("failed to decode {}: {error}", path.display()))
 }
 
 fn material_for(dom: &WeakDom, instance: &Instance) -> ModelMaterial {
@@ -305,7 +340,7 @@ fn primitive_mesh(instance: &Instance) -> UnionMesh {
         0 => sphere_mesh(size),
         2 => cylinder_mesh(size),
         3 => wedge_mesh(size),
-        4 => wedge_mesh(size),
+        4 => corner_wedge_mesh(size),
         _ => box_mesh(size),
     }
 }
@@ -371,8 +406,16 @@ fn cylinder_mesh(size: Vector3) -> UnionMesh {
             &mut mesh,
             [
                 [radius_x * current[0], -half_height, radius_z * current[1]],
-                [radius_x * following[0], -half_height, radius_z * following[1]],
-                [radius_x * following[0], half_height, radius_z * following[1]],
+                [
+                    radius_x * following[0],
+                    -half_height,
+                    radius_z * following[1],
+                ],
+                [
+                    radius_x * following[0],
+                    half_height,
+                    radius_z * following[1],
+                ],
                 [radius_x * current[0], half_height, radius_z * current[1]],
             ],
             [current[0], 0.0, current[1]],
@@ -444,10 +487,10 @@ fn sphere_mesh(size: Vector3) -> UnionMesh {
         indices: Vec::with_capacity(rings * segments * 6),
     };
     for ring in 0..rings {
-        let lower = -std::f32::consts::FRAC_PI_2
-            + ring as f32 / rings as f32 * std::f32::consts::PI;
-        let upper = -std::f32::consts::FRAC_PI_2
-            + (ring + 1) as f32 / rings as f32 * std::f32::consts::PI;
+        let lower =
+            -std::f32::consts::FRAC_PI_2 + ring as f32 / rings as f32 * std::f32::consts::PI;
+        let upper =
+            -std::f32::consts::FRAC_PI_2 + (ring + 1) as f32 / rings as f32 * std::f32::consts::PI;
         for segment in 0..segments {
             let next = (segment + 1) % segments;
             let angle = segment as f32 / segments as f32 * std::f32::consts::TAU;
@@ -460,9 +503,21 @@ fn sphere_mesh(size: Vector3) -> UnionMesh {
             ];
             let normals = points.map(|point| {
                 let normal = [
-                    if radii[0] == 0.0 { 0.0 } else { point[0] / radii[0] },
-                    if radii[1] == 0.0 { 0.0 } else { point[1] / radii[1] },
-                    if radii[2] == 0.0 { 0.0 } else { point[2] / radii[2] },
+                    if radii[0] == 0.0 {
+                        0.0
+                    } else {
+                        point[0] / radii[0]
+                    },
+                    if radii[1] == 0.0 {
+                        0.0
+                    } else {
+                        point[1] / radii[1]
+                    },
+                    if radii[2] == 0.0 {
+                        0.0
+                    } else {
+                        point[2] / radii[2]
+                    },
                 ];
                 normalize(normal)
             });
@@ -489,77 +544,131 @@ fn wedge_mesh(size: Vector3) -> UnionMesh {
     let x = size.x.abs() * 0.5;
     let y = size.y.abs() * 0.5;
     let z = size.z.abs() * 0.5;
+
+    let p = |v: [f32; 3]| [-v[0], v[1], -v[2]];
+    let n = |v: [f32; 3]| [-v[0], v[1], -v[2]];
+
     let mut mesh = UnionMesh {
         vertices: Vec::with_capacity(18),
         indices: Vec::with_capacity(24),
     };
+
     add_face(
         &mut mesh,
-        [[-x, -y, -z], [-x, -y, z], [x, -y, z], [x, -y, -z]],
-        [0.0, -1.0, 0.0],
+        [
+            p([-x, -y, -z]),
+            p([-x, -y, z]),
+            p([x, -y, z]),
+            p([x, -y, -z]),
+        ],
+        n([0.0, -1.0, 0.0]),
     );
+
     add_face(
         &mut mesh,
-        [[-x, -y, -z], [x, -y, -z], [x, y, -z], [-x, y, -z]],
-        [0.0, 0.0, -1.0],
+        [
+            p([-x, -y, -z]),
+            p([x, -y, -z]),
+            p([x, y, -z]),
+            p([-x, y, -z]),
+        ],
+        n([0.0, 0.0, -1.0]),
     );
+
     add_face(
         &mut mesh,
-        [[-x, -y, z], [-x, y, -z], [-x, -y, -z], [-x, y, -z]],
-        [-1.0, 0.0, 0.0],
+        [
+            p([-x, -y, z]),
+            p([-x, y, -z]),
+            p([-x, -y, -z]),
+            p([-x, y, -z]),
+        ],
+        n([-1.0, 0.0, 0.0]),
     );
+
     add_face(
         &mut mesh,
-        [[x, -y, -z], [x, -y, z], [x, y, -z], [x, y, -z]],
-        [1.0, 0.0, 0.0],
+        [p([x, -y, -z]), p([x, -y, z]), p([x, y, -z]), p([x, y, -z])],
+        n([1.0, 0.0, 0.0]),
     );
+
     let base = mesh.vertices.len() as u32;
-    let slope_normal = normalize([0.0, 1.0, 1.0]);
+
+    // Original [0, 1, 1] rotated 180° around Z => [0, -1, 1].
+    let slope_normal = normalize(n([0.0, 1.0, 1.0]));
+
     mesh.vertices.extend([
         UnionVertex {
-            position: [-x, -y, z],
+            position: p([-x, -y, z]),
             normal: slope_normal,
             tex_coord: [0.0, 0.0],
             color: [255; 4],
         },
         UnionVertex {
-            position: [x, -y, z],
+            position: p([x, -y, z]),
             normal: slope_normal,
             tex_coord: [1.0, 0.0],
             color: [255; 4],
         },
         UnionVertex {
-            position: [x, y, -z],
+            position: p([x, y, -z]),
             normal: slope_normal,
             tex_coord: [1.0, 1.0],
             color: [255; 4],
         },
         UnionVertex {
-            position: [-x, y, -z],
+            position: p([-x, y, -z]),
             normal: slope_normal,
             tex_coord: [0.0, 1.0],
             color: [255; 4],
         },
     ]);
-    mesh.indices.extend([
-        base,
-        base + 1,
-        base + 2,
-        base,
-        base + 2,
-        base + 3,
-    ]);
+
+    mesh.indices
+        .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+
+    mesh
+}
+
+fn corner_wedge_mesh(size: Vector3) -> UnionMesh {
+    let x = size.x.abs() * 0.5;
+    let y = size.y.abs() * 0.5;
+    let z = size.z.abs() * 0.5;
+    let apex = [x, y, -z];
+    let bottom = [[-x, -y, -z], [x, -y, -z], [x, -y, z], [-x, -y, z]];
+    let mut mesh = UnionMesh {
+        vertices: Vec::with_capacity(16),
+        indices: Vec::with_capacity(30),
+    };
+
+    add_face(
+        &mut mesh,
+        [bottom[3], bottom[0], bottom[1], bottom[2]],
+        [0.0, -1.0, 0.0],
+    );
+    add_triangle(&mut mesh, [bottom[0], apex, bottom[1]], [0.0, 0.0, -1.0]);
+    add_triangle(&mut mesh, [bottom[1], apex, bottom[2]], [1.0, 0.0, 0.0]);
+    add_triangle(
+        &mut mesh,
+        [apex, bottom[3], bottom[2]],
+        normalize([0.0, z, y]),
+    );
+    add_triangle(
+        &mut mesh,
+        [bottom[3], apex, bottom[0]],
+        normalize([-y, x, 0.0]),
+    );
+
     mesh
 }
 
 fn add_face(mesh: &mut UnionMesh, positions: [[f32; 3]; 4], normal: [f32; 3]) {
     let base = mesh.vertices.len() as u32;
-    for (position, tex_coord) in positions.into_iter().zip([
-        [0.0, 0.0],
-        [1.0, 0.0],
-        [1.0, 1.0],
-        [0.0, 1.0],
-    ]) {
+    for (position, tex_coord) in
+        positions
+            .into_iter()
+            .zip([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+    {
         mesh.vertices.push(UnionVertex {
             position,
             normal,
@@ -569,6 +678,22 @@ fn add_face(mesh: &mut UnionMesh, positions: [[f32; 3]; 4], normal: [f32; 3]) {
     }
     mesh.indices
         .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+fn add_triangle(mesh: &mut UnionMesh, positions: [[f32; 3]; 3], normal: [f32; 3]) {
+    let base = mesh.vertices.len() as u32;
+    for (position, tex_coord) in positions
+        .into_iter()
+        .zip([[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]])
+    {
+        mesh.vertices.push(UnionVertex {
+            position,
+            normal,
+            tex_coord,
+            color: [255; 4],
+        });
+    }
+    mesh.indices.extend([base, base + 1, base + 2]);
 }
 
 fn sphere_point(latitude: f32, longitude: f32, radii: [f32; 3]) -> [f32; 3] {
@@ -638,7 +763,9 @@ fn parse_asset_id(uri: &str) -> Option<String> {
         .and_then(|value| value.split(['?', '#', '/']).next());
     query_id
         .or(scheme_id)
-        .filter(|value| !value.is_empty() && value.chars().all(|character| character.is_ascii_digit()))
+        .filter(|value| {
+            !value.is_empty() && value.chars().all(|character| character.is_ascii_digit())
+        })
         .map(str::to_owned)
 }
 
@@ -757,9 +884,15 @@ fn relative_matrix(root: CFrame, child: CFrame) -> [f32; 16] {
         child.position.z - root.position.z,
     ];
     let position = [
-        (0..3).map(|index| root_rotation[index][0] * delta[index]).sum(),
-        (0..3).map(|index| root_rotation[index][1] * delta[index]).sum(),
-        (0..3).map(|index| root_rotation[index][2] * delta[index]).sum(),
+        (0..3)
+            .map(|index| root_rotation[index][0] * delta[index])
+            .sum(),
+        (0..3)
+            .map(|index| root_rotation[index][1] * delta[index])
+            .sum(),
+        (0..3)
+            .map(|index| root_rotation[index][2] * delta[index])
+            .sum(),
     ];
 
     [
@@ -784,9 +917,21 @@ fn relative_matrix(root: CFrame, child: CFrame) -> [f32; 16] {
 
 fn matrix_rows(cframe: CFrame) -> [[f32; 3]; 3] {
     [
-        [cframe.orientation.x.x, cframe.orientation.x.y, cframe.orientation.x.z],
-        [cframe.orientation.y.x, cframe.orientation.y.y, cframe.orientation.y.z],
-        [cframe.orientation.z.x, cframe.orientation.z.y, cframe.orientation.z.z],
+        [
+            cframe.orientation.x.x,
+            cframe.orientation.x.y,
+            cframe.orientation.x.z,
+        ],
+        [
+            cframe.orientation.y.x,
+            cframe.orientation.y.y,
+            cframe.orientation.y.z,
+        ],
+        [
+            cframe.orientation.z.x,
+            cframe.orientation.z.y,
+            cframe.orientation.z.z,
+        ],
     ]
 }
 
@@ -816,5 +961,17 @@ mod tests {
         );
         let matrix = relative_matrix(root, child);
         assert_eq!(&matrix[12..15], &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn corner_wedge_rises_toward_positive_x_negative_z() {
+        let mesh = corner_wedge_mesh(Vector3::new(2.0, 4.0, 6.0));
+
+        assert!(
+            mesh.vertices
+                .iter()
+                .filter(|vertex| vertex.position[1] == 2.0)
+                .all(|vertex| vertex.position == [1.0, 2.0, -3.0])
+        );
     }
 }
