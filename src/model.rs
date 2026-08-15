@@ -364,7 +364,8 @@ fn material_for(dom: &WeakDom, instance: &Instance) -> ModelMaterial {
         .unwrap_or_else(|| "plastic".to_owned());
     let color = instance
         .properties
-        .get(&"Color3uint8".into())
+        .get(&"Color".into())
+        .or_else(|| instance.properties.get(&"Color3uint8".into()))
         .and_then(color_value)
         .unwrap_or([255, 255, 255]);
     let transparency = instance
