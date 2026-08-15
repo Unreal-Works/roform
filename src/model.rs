@@ -459,9 +459,10 @@ fn box_mesh(size: Vector3) -> UnionMesh {
 
 fn cylinder_mesh(size: Vector3) -> UnionMesh {
     let segments = 24usize;
-    let radius_x = size.x.abs() * 0.5;
-    let radius_z = size.z.abs() * 0.5;
-    let half_height = size.y.abs() * 0.5;
+    let radius_x = size.z.abs() * 0.5;
+    let radius_z = size.y.abs() * 0.5;
+    let half_height = size.x.abs() * 0.5;
+
     let mut mesh = UnionMesh {
         vertices: Vec::with_capacity(segments * 12),
         indices: Vec::with_capacity(segments * 12 * 3),
@@ -471,81 +472,90 @@ fn cylinder_mesh(size: Vector3) -> UnionMesh {
         let next = (segment + 1) % segments;
         let angle = segment as f32 / segments as f32 * std::f32::consts::TAU;
         let next_angle = next as f32 / segments as f32 * std::f32::consts::TAU;
+
         let current = [angle.cos(), angle.sin()];
         let following = [next_angle.cos(), next_angle.sin()];
+
+        // +90 degrees around Z:
+        // (x, y, z) -> (-y, x, z)
         add_face(
             &mut mesh,
             [
-                [radius_x * current[0], -half_height, radius_z * current[1]],
+                [half_height, radius_x * current[0], radius_z * current[1]],
                 [
-                    radius_x * following[0],
-                    -half_height,
-                    radius_z * following[1],
-                ],
-                [
-                    radius_x * following[0],
                     half_height,
+                    radius_x * following[0],
                     radius_z * following[1],
                 ],
-                [radius_x * current[0], half_height, radius_z * current[1]],
+                [
+                    -half_height,
+                    radius_x * following[0],
+                    radius_z * following[1],
+                ],
+                [-half_height, radius_x * current[0], radius_z * current[1]],
             ],
-            [current[0], 0.0, current[1]],
+            [0.0, current[0], current[1]],
         );
 
+        // Original top cap (y = +half_height)
+        // rotated to x = -half_height.
         let base = mesh.vertices.len() as u32;
         mesh.vertices.extend([
             UnionVertex {
-                position: [0.0, half_height, 0.0],
-                normal: [0.0, 1.0, 0.0],
+                position: [-half_height, 0.0, 0.0],
+                normal: [-1.0, 0.0, 0.0],
                 tex_coord: [0.5, 0.5],
                 color: [255; 4],
             },
             UnionVertex {
                 position: [
+                    -half_height,
                     radius_x * following[0],
-                    half_height,
                     radius_z * following[1],
                 ],
-                normal: [0.0, 1.0, 0.0],
+                normal: [-1.0, 0.0, 0.0],
                 tex_coord: [following[0] * 0.5 + 0.5, following[1] * 0.5 + 0.5],
                 color: [255; 4],
             },
             UnionVertex {
-                position: [radius_x * current[0], half_height, radius_z * current[1]],
-                normal: [0.0, 1.0, 0.0],
+                position: [-half_height, radius_x * current[0], radius_z * current[1]],
+                normal: [-1.0, 0.0, 0.0],
                 tex_coord: [current[0] * 0.5 + 0.5, current[1] * 0.5 + 0.5],
                 color: [255; 4],
             },
         ]);
         mesh.indices.extend([base, base + 1, base + 2]);
 
+        // Original bottom cap (y = -half_height)
+        // rotated to x = +half_height.
         let base = mesh.vertices.len() as u32;
         mesh.vertices.extend([
             UnionVertex {
-                position: [0.0, -half_height, 0.0],
-                normal: [0.0, -1.0, 0.0],
+                position: [half_height, 0.0, 0.0],
+                normal: [1.0, 0.0, 0.0],
                 tex_coord: [0.5, 0.5],
                 color: [255; 4],
             },
             UnionVertex {
-                position: [radius_x * current[0], -half_height, radius_z * current[1]],
-                normal: [0.0, -1.0, 0.0],
+                position: [half_height, radius_x * current[0], radius_z * current[1]],
+                normal: [1.0, 0.0, 0.0],
                 tex_coord: [current[0] * 0.5 + 0.5, current[1] * 0.5 + 0.5],
                 color: [255; 4],
             },
             UnionVertex {
                 position: [
+                    half_height,
                     radius_x * following[0],
-                    -half_height,
                     radius_z * following[1],
                 ],
-                normal: [0.0, -1.0, 0.0],
+                normal: [1.0, 0.0, 0.0],
                 tex_coord: [following[0] * 0.5 + 0.5, following[1] * 0.5 + 0.5],
                 color: [255; 4],
             },
         ]);
         mesh.indices.extend([base, base + 1, base + 2]);
     }
+
     mesh
 }
 

@@ -40,6 +40,16 @@ fn default_assets_dir() -> PathBuf {
         .join("assets")
 }
 
+fn absolute_path(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        return Ok(path.to_owned());
+    }
+
+    std::env::current_dir()
+        .map(|current_dir| current_dir.join(path))
+        .map_err(|error| format!("failed to determine the current working directory: {error}"))
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli.input, cli.out_dir, cli.assets_dir) {
@@ -137,7 +147,8 @@ fn export_models(
     assets_dir: &Path,
     output_dir: &Path,
 ) -> Result<ModelReport, String> {
-    fs::create_dir_all(output_dir).map_err(|error| {
+    let output_dir = absolute_path(output_dir)?;
+    fs::create_dir_all(&output_dir).map_err(|error| {
         format!(
             "failed to create model output directory {}: {error}",
             output_dir.display()
@@ -155,6 +166,7 @@ fn export_models(
     };
 
     for source_path in source_files {
+        let source_path = absolute_path(&source_path)?;
         let source_bytes = match fs::read(&source_path) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -196,7 +208,7 @@ fn export_models(
             if output_path.is_file() {
                 manifest_entries.push(ModelManifestEntry {
                     hash: model_hash,
-                    output: output_name,
+                    output: output_path.display().to_string(),
                     source: source_path.display().to_string(),
                     name: model_asset.name.clone(),
                 });
@@ -223,7 +235,7 @@ fn export_models(
             }
             manifest_entries.push(ModelManifestEntry {
                 hash: model_hash,
-                output: output_name,
+                output: output_path.display().to_string(),
                 source: source_path.display().to_string(),
                 name: model_asset.name.clone(),
             });

@@ -5,7 +5,7 @@ Please update this document after any relevant changes.
 ## Asset Pipeline
 
 - The CLI stages assets as `download`, decoded `mesh`, and hash-keyed `model` GLTF output. Model GLTF files are written below `roform/model/<blake3-hash>.gltf`, with source and model names recorded in `roform/model/manifest.json`.
-- Model export embeds valid images from `assets/material/` as data URIs, using Roblox Material enum values from the official enum documentation when mapping material names.
+- Model export embeds valid images from `assets/material/` as data URIs, using Roblox Material enum values from the official enum documentation when mapping material names. The generated model manifest records absolute source and output paths.
 
 ## Gotchas
 
@@ -14,3 +14,4 @@ Please update this document after any relevant changes.
 3. `rbx_dom_weak::Instance::properties` is keyed by `Ustr`; convert string property names before calling `get`.
 4. Roblox XML may serialize `MeshId` as `<Content name="MeshId">`, while `rbx_xml` exposes the canonical property as `MeshContent`.
 5. Downloaded union `.rbxm` packages store geometry in `PartOperationAsset.MeshData` as a `BinaryString`; raw mesh downloads use `asset.bin`.
+6. Imported `MeshPart` and `UnionOperation` geometry is scaled by `size / InitialSize`; when `InitialSize` is absent, use decoded mesh bounds as the source size.
