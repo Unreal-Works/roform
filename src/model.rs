@@ -1,5 +1,5 @@
 use crate::{
-    csg::{UnionMesh, UnionVertex},
+    csg::{self, UnionMesh, UnionVertex},
     decode_mesh_payload,
 };
 use rbx_dom_weak::{Instance, WeakDom, types::Ref};
@@ -7,6 +7,7 @@ use rbx_types::{CFrame, Variant, Vector3};
 use std::{
     collections::HashMap,
     fs,
+    io::BufReader,
     path::{Path, PathBuf},
 };
 
@@ -40,7 +41,11 @@ pub(crate) fn source_files(input: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-pub(crate) fn parse_models(path: &Path, download_dir: &Path) -> Result<Vec<ModelAsset>, String> {
+pub(crate) fn parse_models(
+    path: &Path,
+    download_dir: &Path,
+    mesh_dir: &Path,
+) -> Result<Vec<ModelAsset>, String> {
     let extension = path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -51,8 +56,10 @@ pub(crate) fn parse_models(path: &Path, download_dir: &Path) -> Result<Vec<Model
     let dom = match extension.as_str() {
         "rbxm" | "rbxl" => rbx_binary::from_reader(file)
             .map_err(|error| format!("failed to decode {}: {error}", path.display()))?,
-        "rbxmx" | "rbxlx" => rbx_xml::from_reader(file, rbx_xml::DecodeOptions::default())
-            .map_err(|error| format!("failed to decode {}: {error}", path.display()))?,
+        "rbxmx" | "rbxlx" => {
+            rbx_xml::from_reader(BufReader::new(file), rbx_xml::DecodeOptions::default())
+                .map_err(|error| format!("failed to decode {}: {error}", path.display()))?
+        }
         _ => {
             return Err(format!(
                 "unsupported Roblox source extension for {}",
@@ -65,7 +72,7 @@ pub(crate) fn parse_models(path: &Path, download_dir: &Path) -> Result<Vec<Model
     let mut mesh_cache = HashMap::new();
     roots
         .into_iter()
-        .map(|root_ref| parse_model(&dom, root_ref, download_dir, &mut mesh_cache))
+        .map(|root_ref| parse_model(&dom, root_ref, download_dir, mesh_dir, &mut mesh_cache))
         .collect()
 }
 
@@ -123,6 +130,7 @@ fn parse_model(
     dom: &WeakDom,
     root_ref: Ref,
     download_dir: &Path,
+    mesh_dir: &Path,
     mesh_cache: &mut HashMap<String, Result<UnionMesh, String>>,
 ) -> Result<ModelAsset, String> {
     let root = dom
@@ -158,7 +166,7 @@ fn parse_model(
                     if let Some(asset_id) = property_asset_id(special_mesh, "MeshId") {
                         material.base_color_asset = property_asset_id(special_mesh, "TextureId")
                             .or_else(|| property_asset_id(special_mesh, "TextureID"));
-                        match load_mesh(&asset_id, download_dir, mesh_cache) {
+                        match load_mesh(&asset_id, download_dir, mesh_dir, mesh_cache) {
                             Ok(mut mesh) => {
                                 apply_special_mesh_transform(&mut mesh, special_mesh);
                                 Some(mesh)
@@ -180,16 +188,18 @@ fn parse_model(
                 let mesh_id = property_asset_id(instance, "MeshId")
                     .or_else(|| property_asset_id(instance, "MeshContent"));
                 match mesh_id {
-                    Some(asset_id) => match load_mesh(&asset_id, download_dir, mesh_cache) {
-                        Ok(mut mesh) => {
-                            apply_instance_size(&mut mesh, instance);
-                            Some(mesh)
+                    Some(asset_id) => {
+                        match load_mesh(&asset_id, download_dir, mesh_dir, mesh_cache) {
+                            Ok(mut mesh) => {
+                                apply_instance_size(&mut mesh, instance);
+                                Some(mesh)
+                            }
+                            Err(error) => {
+                                warnings.push(format!("{} ({}): {error}", instance.name, asset_id));
+                                None
+                            }
                         }
-                        Err(error) => {
-                            warnings.push(format!("{} ({}): {error}", instance.name, asset_id));
-                            None
-                        }
-                    },
+                    }
                     None => {
                         warnings.push(format!("{}: MeshPart has no MeshId", instance.name));
                         None
@@ -197,7 +207,7 @@ fn parse_model(
                 }
             }
             "UnionOperation" => match property_asset_id(instance, "AssetId") {
-                Some(asset_id) => match load_mesh(&asset_id, download_dir, mesh_cache) {
+                Some(asset_id) => match load_mesh(&asset_id, download_dir, mesh_dir, mesh_cache) {
                     Ok(mut mesh) => {
                         apply_instance_size(&mut mesh, instance);
                         Some(mesh)
@@ -244,35 +254,65 @@ fn parse_model(
 fn load_mesh(
     asset_id: &str,
     download_dir: &Path,
+    mesh_dir: &Path,
     cache: &mut HashMap<String, Result<UnionMesh, String>>,
 ) -> Result<UnionMesh, String> {
     if let Some(mesh) = cache.get(asset_id) {
         return mesh.clone();
     }
 
-    let payload_path = download_dir.join(asset_id).join("asset.bin");
-    let result = if payload_path.is_file() {
-        fs::read(&payload_path)
-            .map_err(|error| format!("failed to read {}: {error}", payload_path.display()))
-            .and_then(|bytes| decode_mesh_payload(&bytes))
+    let asset_dir = download_dir.join(asset_id);
+    let payload_path = asset_dir.join("asset.bin");
+    let (source_path, packaged) = if payload_path.is_file() {
+        (payload_path, false)
     } else {
-        let package_path = download_dir.join(asset_id).join("asset.rbxm");
-        if package_path.is_file() {
-            load_packaged_mesh(&package_path)
-        } else {
-            fs::read(&payload_path)
-                .map_err(|error| format!("failed to read {}: {error}", payload_path.display()))
-                .and_then(|bytes| decode_mesh_payload(&bytes))
-        }
+        let package_path = asset_dir.join("asset.rbxm");
+        (package_path, true)
     };
+    let result = fs::read(&source_path)
+        .map_err(|error| format!("failed to read {}: {error}", source_path.display()))
+        .and_then(|bytes| {
+            let cache_path = mesh_dir.join(format!("{}.bin", blake3::hash(&bytes).to_hex()));
+            match fs::read(&cache_path) {
+                Ok(cached_bytes) => csg::decode_cached_mesh(&cached_bytes).or_else(|_| {
+                    decode_and_cache_mesh(&bytes, &source_path, packaged, &cache_path)
+                }),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    decode_and_cache_mesh(&bytes, &source_path, packaged, &cache_path)
+                }
+                Err(error) => Err(format!(
+                    "failed to read decoded mesh cache {}: {error}",
+                    cache_path.display()
+                )),
+            }
+        });
     cache.insert(asset_id.to_owned(), result.clone());
     result
 }
 
-fn load_packaged_mesh(path: &Path) -> Result<UnionMesh, String> {
-    let file = fs::File::open(path)
-        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-    let dom = rbx_binary::from_reader(file)
+fn decode_and_cache_mesh(
+    bytes: &[u8],
+    source_path: &Path,
+    packaged: bool,
+    cache_path: &Path,
+) -> Result<UnionMesh, String> {
+    let mesh = if packaged {
+        load_packaged_mesh_bytes(bytes, source_path)?
+    } else {
+        decode_mesh_payload(bytes)?
+    };
+    let cached_bytes = csg::encode_cached_mesh(&mesh)?;
+    if let Err(error) = fs::write(cache_path, cached_bytes) {
+        eprintln!(
+            "warning: failed to write decoded mesh cache {}: {error}",
+            cache_path.display()
+        );
+    }
+    Ok(mesh)
+}
+
+fn load_packaged_mesh_bytes(bytes: &[u8], path: &Path) -> Result<UnionMesh, String> {
+    let dom = rbx_binary::from_reader(bytes)
         .map_err(|error| format!("failed to decode {}: {error}", path.display()))?;
     let mesh_data = dom
         .descendants()

@@ -4,11 +4,13 @@ mod model;
 
 use clap::Parser;
 use mhif::{DownloadOptions, download_assets, extract_asset_ids_cached};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     process::ExitCode,
+    time::UNIX_EPOCH,
 };
 
 #[derive(Debug, Parser)]
@@ -89,7 +91,14 @@ fn run(input: PathBuf, out_dir: PathBuf, assets_dir: PathBuf, glb: bool) -> Resu
     // Model GLTF export step
     let model_start_time = std::time::Instant::now();
     let model_out_dir = out_dir.join("model");
-    let model_report = export_models(&input, &download_out_dir, &assets_dir, &model_out_dir)?;
+    let mesh_out_dir = out_dir.join("mesh");
+    let model_report = export_models(
+        &input,
+        &download_out_dir,
+        &mesh_out_dir,
+        &assets_dir,
+        &model_out_dir,
+    )?;
     for failure in &model_report.failed {
         eprintln!("failed model {}: {}", failure.source, failure.error);
     }
@@ -154,13 +163,15 @@ struct GlbReport {
     output_directory: PathBuf,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct ModelManifest {
     version: u32,
+    dependency_fingerprint: String,
+    sources: Vec<ModelSourceManifestEntry>,
     models: Vec<ModelManifestEntry>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct ModelManifestEntry {
     hash: String,
     output: String,
@@ -168,15 +179,42 @@ struct ModelManifestEntry {
     name: String,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct ModelSourceManifestEntry {
+    source: String,
+    hash: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct FingerprintCache {
+    version: u32,
+    files: HashMap<String, FingerprintCacheEntry>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct FingerprintCacheEntry {
+    length: u64,
+    modified_nanos: Option<u128>,
+    hash: String,
+}
+
 fn export_models(
     input: &Path,
     download_dir: &Path,
+    mesh_dir: &Path,
     assets_dir: &Path,
     output_dir: &Path,
 ) -> Result<ModelReport, String> {
     let download_dir = absolute_path(download_dir)?;
+    let mesh_dir = absolute_path(mesh_dir)?;
     let assets_dir = absolute_path(assets_dir)?;
     let output_dir = absolute_path(output_dir)?;
+    fs::create_dir_all(&mesh_dir).map_err(|error| {
+        format!(
+            "failed to create decoded mesh directory {}: {error}",
+            mesh_dir.display()
+        )
+    })?;
     fs::create_dir_all(&output_dir).map_err(|error| {
         format!(
             "failed to create model output directory {}: {error}",
@@ -184,8 +222,27 @@ fn export_models(
         )
     })?;
 
-    let source_files = model::source_files(input)?;
-    let dependency_fingerprint = tree_fingerprint(&download_dir, &assets_dir)?;
+    let source_files = model::source_files(input)?
+        .into_iter()
+        .map(|path| absolute_path(&path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let dependency_fingerprint = tree_fingerprint(
+        &download_dir,
+        &assets_dir,
+        &mesh_dir.join("fingerprint.json"),
+    )?;
+    let source_entries = source_manifest_entries(&source_files);
+    if let Some(source_entries) = &source_entries
+        && let Some(models) = reusable_models(&output_dir, &dependency_fingerprint, source_entries)
+    {
+        return Ok(ModelReport {
+            exported: 0,
+            cached: models.len(),
+            failed: Vec::new(),
+            models,
+            output_directory: output_dir,
+        });
+    }
     let mut manifest_entries = Vec::new();
     let mut report = ModelReport {
         exported: 0,
@@ -196,7 +253,6 @@ fn export_models(
     };
 
     for source_path in source_files {
-        let source_path = absolute_path(&source_path)?;
         let source_bytes = match fs::read(&source_path) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -207,7 +263,7 @@ fn export_models(
                 continue;
             }
         };
-        let models = match model::parse_models(&source_path, &download_dir) {
+        let models = match model::parse_models(&source_path, &download_dir, &mesh_dir) {
             Ok(models) => models,
             Err(error) => {
                 report.failed.push(ModelFailure {
@@ -290,7 +346,9 @@ fn export_models(
     }
 
     let manifest = ModelManifest {
-        version: 1,
+        version: 2,
+        dependency_fingerprint,
+        sources: source_entries.unwrap_or_default(),
         models: manifest_entries,
     };
     let manifest = serde_json::to_string_pretty(&manifest)
@@ -373,18 +431,104 @@ fn model_fingerprint(
     hasher.finalize().to_hex().to_string()
 }
 
-fn tree_fingerprint(first: &Path, second: &Path) -> Result<String, String> {
+fn source_manifest_entries(paths: &[PathBuf]) -> Option<Vec<ModelSourceManifestEntry>> {
+    paths
+        .iter()
+        .map(|path| {
+            let bytes = fs::read(path).ok()?;
+            Some(ModelSourceManifestEntry {
+                source: path.display().to_string(),
+                hash: blake3::hash(&bytes).to_hex().to_string(),
+            })
+        })
+        .collect()
+}
+
+fn reusable_models(
+    output_dir: &Path,
+    dependency_fingerprint: &str,
+    sources: &[ModelSourceManifestEntry],
+) -> Option<Vec<ModelManifestEntry>> {
+    let manifest_bytes = fs::read(output_dir.join("manifest.json")).ok()?;
+    let manifest: ModelManifest = serde_json::from_slice(&manifest_bytes).ok()?;
+    if manifest.version != 2
+        || manifest.dependency_fingerprint != dependency_fingerprint
+        || manifest.sources != sources
+    {
+        return None;
+    }
+
+    let buffer_dir = output_dir.parent().unwrap_or(output_dir).join("bin");
+    if manifest.models.iter().all(|model| {
+        Path::new(&model.output).is_file()
+            && buffer_dir.join(format!("{}.bin", model.hash)).is_file()
+    }) {
+        Some(manifest.models)
+    } else {
+        None
+    }
+}
+
+fn tree_fingerprint(first: &Path, second: &Path, cache_path: &Path) -> Result<String, String> {
     let mut files = Vec::new();
     collect_files(first, &mut files)?;
     collect_files(second, &mut files)?;
     files.sort();
 
+    let previous_cache = fs::read(cache_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<FingerprintCache>(&bytes).ok())
+        .filter(|cache| cache.version == 1);
+    let mut current_cache = HashMap::with_capacity(files.len());
     let mut hasher = blake3::Hasher::new();
     for path in files {
-        hasher.update(path.to_string_lossy().as_bytes());
-        let bytes = fs::read(&path)
-            .map_err(|error| format!("failed to read dependency {}: {error}", path.display()))?;
-        hasher.update(&bytes);
+        let path_string = path.to_string_lossy().into_owned();
+        let metadata = fs::metadata(&path)
+            .map_err(|error| format!("failed to inspect dependency {}: {error}", path.display()))?;
+        let modified_nanos = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos());
+        let hash = if let Some(entry) = previous_cache
+            .as_ref()
+            .and_then(|cache| cache.files.get(&path_string))
+            .filter(|entry| {
+                modified_nanos.is_some()
+                    && entry.length == metadata.len()
+                    && entry.modified_nanos == modified_nanos
+            }) {
+            entry.hash.clone()
+        } else {
+            let bytes = fs::read(&path).map_err(|error| {
+                format!("failed to read dependency {}: {error}", path.display())
+            })?;
+            blake3::hash(&bytes).to_hex().to_string()
+        };
+
+        hasher.update(path_string.as_bytes());
+        hasher.update(hash.as_bytes());
+        current_cache.insert(
+            path_string,
+            FingerprintCacheEntry {
+                length: metadata.len(),
+                modified_nanos,
+                hash,
+            },
+        );
+    }
+
+    let cache = FingerprintCache {
+        version: 1,
+        files: current_cache,
+    };
+    if let Ok(bytes) = serde_json::to_vec(&cache)
+        && let Err(error) = fs::write(cache_path, bytes)
+    {
+        eprintln!(
+            "warning: failed to write dependency fingerprint cache {}: {error}",
+            cache_path.display()
+        );
     }
     Ok(hasher.finalize().to_hex().to_string())
 }
