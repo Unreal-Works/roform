@@ -49,6 +49,7 @@ pub(crate) fn parse_models(
     path: &Path,
     download_dir: &Path,
     mesh_dir: &Path,
+    studs_per_tile: f32,
 ) -> Result<Vec<ModelAsset>, String> {
     let extension = path
         .extension()
@@ -76,7 +77,16 @@ pub(crate) fn parse_models(
     let mut mesh_cache = HashMap::new();
     roots
         .into_iter()
-        .map(|root_ref| parse_model(&dom, root_ref, download_dir, mesh_dir, &mut mesh_cache))
+        .map(|root_ref| {
+            parse_model(
+                &dom,
+                root_ref,
+                download_dir,
+                mesh_dir,
+                studs_per_tile,
+                &mut mesh_cache,
+            )
+        })
         .collect()
 }
 
@@ -135,6 +145,7 @@ fn parse_model(
     root_ref: Ref,
     download_dir: &Path,
     mesh_dir: &Path,
+    studs_per_tile: f32,
     mesh_cache: &mut HashMap<String, Result<UnionMesh, String>>,
 ) -> Result<ModelAsset, String> {
     let root = dom
@@ -183,10 +194,10 @@ fn parse_model(
                             }
                         }
                     } else {
-                        Some(primitive_mesh(instance))
+                        Some(primitive_mesh(instance, studs_per_tile))
                     }
                 } else {
-                    Some(primitive_mesh(instance))
+                    Some(primitive_mesh(instance, studs_per_tile))
                 }
             }
             "MeshPart" => {
@@ -445,7 +456,7 @@ fn material_for(dom: &WeakDom, instance: &Instance) -> ModelMaterial {
     material
 }
 
-fn primitive_mesh(instance: &Instance) -> UnionMesh {
+fn primitive_mesh(instance: &Instance, studs_per_tile: f32) -> UnionMesh {
     let size = property_vector3(instance, "size")
         .or_else(|| property_vector3(instance, "Size"))
         .unwrap_or(Vector3::new(1.0, 1.0, 1.0));
@@ -456,16 +467,18 @@ fn primitive_mesh(instance: &Instance) -> UnionMesh {
         .and_then(enum_value)
         .unwrap_or(1);
 
-    match shape {
+    let mut mesh = match shape {
         0 => sphere_mesh(size),
         2 => cylinder_mesh(size),
         3 => wedge_mesh(size),
         4 => corner_wedge_mesh(size),
-        _ => box_mesh(size),
-    }
+        _ => return box_mesh(size, studs_per_tile),
+    };
+    scale_primitive_uvs(&mut mesh, size, shape, studs_per_tile);
+    mesh
 }
 
-fn box_mesh(size: Vector3) -> UnionMesh {
+fn box_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
     let x = size.x.abs() * 0.5;
     let y = size.y.abs() * 0.5;
     let z = size.z.abs() * 0.5;
@@ -503,7 +516,46 @@ fn box_mesh(size: Vector3) -> UnionMesh {
         [[x, -y, -z], [-x, -y, -z], [-x, y, -z], [x, y, -z]],
         [0.0, 0.0, -1.0],
     );
+    scale_primitive_uvs(&mut mesh, size, 1, studs_per_tile);
     mesh
+}
+
+fn scale_primitive_uvs(mesh: &mut UnionMesh, size: Vector3, shape: u32, studs_per_tile: f32) {
+    let tile = studs_per_tile.max(f32::EPSILON);
+    let dimensions = [size.x.abs(), size.y.abs(), size.z.abs()];
+    for vertex in &mut mesh.vertices {
+        let uv_dimensions = match shape {
+            // Roblox balls use longitude around X/Z and latitude along Y.
+            0 => [dimensions[0], dimensions[1]],
+            // Box faces use their two planar dimensions.
+            1 if vertex.normal[0].abs() >= vertex.normal[1].abs()
+                && vertex.normal[0].abs() >= vertex.normal[2].abs() =>
+            {
+                [dimensions[1], dimensions[2]]
+            }
+            1 if vertex.normal[1].abs() >= vertex.normal[2].abs() => [dimensions[2], dimensions[0]],
+            1 => [dimensions[0], dimensions[1]],
+            // Cylinders are generated along X; caps lie in Y/Z.
+            2 if vertex.normal[0].abs() > 0.5 => [dimensions[1], dimensions[2]],
+            2 => [dimensions[1].min(dimensions[2]), dimensions[0]],
+            // Wedge faces are either cardinal planes or the diagonal slope.
+            3 if vertex.normal[0].abs() > 0.5 => [dimensions[1], dimensions[2]],
+            3 if vertex.normal[1].abs() >= vertex.normal[2].abs() => [dimensions[0], dimensions[2]],
+            3 => [dimensions[0], dimensions[1].hypot(dimensions[2])],
+            // Corner wedges use the corresponding physical edge lengths.
+            4 if vertex.normal[1].abs() >= vertex.normal[2].abs()
+                && vertex.normal[1].abs() >= vertex.normal[0].abs() =>
+            {
+                [dimensions[0], dimensions[2]]
+            }
+            4 if vertex.normal[2].abs() >= vertex.normal[0].abs() => [dimensions[0], dimensions[1]],
+            4 if vertex.normal[0].abs() >= vertex.normal[1].abs() => [dimensions[1], dimensions[2]],
+            4 => [dimensions[0].hypot(dimensions[1]), dimensions[2]],
+            _ => [dimensions[0], dimensions[1]],
+        };
+        vertex.tex_coord[0] *= uv_dimensions[0] / tile;
+        vertex.tex_coord[1] *= uv_dimensions[1] / tile;
+    }
 }
 
 fn cylinder_mesh(size: Vector3) -> UnionMesh {
@@ -1199,6 +1251,33 @@ mod tests {
                 .iter()
                 .filter(|vertex| vertex.position[1] == 2.0)
                 .all(|vertex| vertex.position == [1.0, 2.0, -3.0])
+        );
+    }
+
+    #[test]
+    fn scales_box_uvs_by_planar_dimensions() {
+        let mesh = box_mesh(Vector3::new(2.0, 4.0, 6.0), 2.0);
+
+        assert_eq!(
+            &mesh.vertices[0..4]
+                .iter()
+                .map(|vertex| vertex.tex_coord)
+                .collect::<Vec<_>>(),
+            &[[0.0, 0.0], [2.0, 0.0], [2.0, 3.0], [0.0, 3.0]]
+        );
+        assert_eq!(
+            &mesh.vertices[8..12]
+                .iter()
+                .map(|vertex| vertex.tex_coord)
+                .collect::<Vec<_>>(),
+            &[[0.0, 0.0], [3.0, 0.0], [3.0, 1.0], [0.0, 1.0]]
+        );
+        assert_eq!(
+            &mesh.vertices[16..20]
+                .iter()
+                .map(|vertex| vertex.tex_coord)
+                .collect::<Vec<_>>(),
+            &[[0.0, 0.0], [1.0, 0.0], [1.0, 2.0], [0.0, 2.0]]
         );
     }
 

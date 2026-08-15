@@ -32,6 +32,13 @@ struct Cli {
     assets_dir: PathBuf,
     #[arg(long, help = "Also package each exported GLTF as a GLB file")]
     glb: bool,
+    #[arg(
+        long,
+        value_name = "STUDS",
+        default_value_t = 1.0,
+        help = "Physical studs represented by one texture tile"
+    )]
+    studs_per_tile: f32,
 }
 
 fn default_output_dir() -> PathBuf {
@@ -58,7 +65,13 @@ fn absolute_path(path: &Path) -> Result<PathBuf, String> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(cli.input, cli.out_dir, cli.assets_dir, cli.glb) {
+    match run(
+        cli.input,
+        cli.out_dir,
+        cli.assets_dir,
+        cli.glb,
+        cli.studs_per_tile,
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
@@ -67,7 +80,17 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(input: PathBuf, out_dir: PathBuf, assets_dir: PathBuf, glb: bool) -> Result<(), String> {
+fn run(
+    input: PathBuf,
+    out_dir: PathBuf,
+    assets_dir: PathBuf,
+    glb: bool,
+    studs_per_tile: f32,
+) -> Result<(), String> {
+    if !studs_per_tile.is_finite() || studs_per_tile <= 0.0 {
+        return Err("--studs-per-tile must be finite and greater than zero".to_owned());
+    }
+
     // Download step
     let download_start_time = std::time::Instant::now();
     let download_out_dir: PathBuf = out_dir.join("download");
@@ -100,6 +123,7 @@ fn run(input: PathBuf, out_dir: PathBuf, assets_dir: PathBuf, glb: bool) -> Resu
         &mesh_out_dir,
         &assets_dir,
         &model_out_dir,
+        studs_per_tile,
     )?;
     for failure in &model_report.failed {
         eprintln!("failed model {}: {}", failure.source, failure.error);
@@ -168,6 +192,7 @@ struct GlbReport {
 #[derive(Debug, Deserialize, Serialize)]
 struct ModelManifest {
     version: u32,
+    studs_per_tile: f32,
     dependency_fingerprint: String,
     sources: Vec<ModelSourceManifestEntry>,
     models: Vec<ModelManifestEntry>,
@@ -206,6 +231,7 @@ fn export_models(
     mesh_dir: &Path,
     assets_dir: &Path,
     output_dir: &Path,
+    studs_per_tile: f32,
 ) -> Result<ModelReport, String> {
     let download_dir = absolute_path(download_dir)?;
     let mesh_dir = absolute_path(mesh_dir)?;
@@ -235,7 +261,12 @@ fn export_models(
     )?;
     let source_entries = source_manifest_entries(&source_files);
     if let Some(source_entries) = &source_entries
-        && let Some(models) = reusable_models(&output_dir, &dependency_fingerprint, source_entries)
+        && let Some(models) = reusable_models(
+            &output_dir,
+            &dependency_fingerprint,
+            source_entries,
+            studs_per_tile,
+        )
     {
         return Ok(ModelReport {
             exported: 0,
@@ -265,22 +296,24 @@ fn export_models(
                 continue;
             }
         };
-        let models = match model::parse_models(&source_path, &download_dir, &mesh_dir) {
-            Ok(models) => models,
-            Err(error) => {
-                report.failed.push(ModelFailure {
-                    source: source_path.display().to_string(),
-                    error,
-                });
-                continue;
-            }
-        };
+        let models =
+            match model::parse_models(&source_path, &download_dir, &mesh_dir, studs_per_tile) {
+                Ok(models) => models,
+                Err(error) => {
+                    report.failed.push(ModelFailure {
+                        source: source_path.display().to_string(),
+                        error,
+                    });
+                    continue;
+                }
+            };
         for (model_index, model_asset) in models.into_iter().enumerate() {
             let model_hash = model_fingerprint(
                 &source_bytes,
                 &dependency_fingerprint,
                 &model_asset,
                 model_index,
+                studs_per_tile,
             );
             let output_name = format!("{model_hash}.gltf");
             let output_path = output_dir.join(&output_name);
@@ -349,6 +382,7 @@ fn export_models(
 
     let manifest = ModelManifest {
         version: MODEL_FORMAT_VERSION,
+        studs_per_tile,
         dependency_fingerprint,
         sources: source_entries.unwrap_or_default(),
         models: manifest_entries,
@@ -422,6 +456,7 @@ fn model_fingerprint(
     dependency_fingerprint: &str,
     model: &model::ModelAsset,
     model_index: usize,
+    studs_per_tile: f32,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(format!("roform-model-v{MODEL_FORMAT_VERSION}").as_bytes());
@@ -430,6 +465,7 @@ fn model_fingerprint(
     hasher.update(model.name.as_bytes());
     hasher.update(model_index.to_string().as_bytes());
     hasher.update(model.primitives.len().to_string().as_bytes());
+    hasher.update(&studs_per_tile.to_le_bytes());
     hasher.finalize().to_hex().to_string()
 }
 
@@ -450,10 +486,12 @@ fn reusable_models(
     output_dir: &Path,
     dependency_fingerprint: &str,
     sources: &[ModelSourceManifestEntry],
+    studs_per_tile: f32,
 ) -> Option<Vec<ModelManifestEntry>> {
     let manifest_bytes = fs::read(output_dir.join("manifest.json")).ok()?;
     let manifest: ModelManifest = serde_json::from_slice(&manifest_bytes).ok()?;
     if manifest.version != MODEL_FORMAT_VERSION
+        || manifest.studs_per_tile != studs_per_tile
         || manifest.dependency_fingerprint != dependency_fingerprint
         || manifest.sources != sources
     {

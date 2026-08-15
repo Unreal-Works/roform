@@ -30,6 +30,7 @@ pub(crate) fn model_to_gltf(
     let mut materials = Vec::new();
     let mut images = Vec::new();
     let mut textures = Vec::new();
+    let samplers = vec![json!({ "wrapS": 10497, "wrapT": 10497 })];
     let mut material_indices = HashMap::<String, usize>::new();
     let mut image_indices = HashMap::<PathBuf, usize>::new();
     let mut material_export = MaterialExport {
@@ -159,6 +160,7 @@ pub(crate) fn model_to_gltf(
         "bufferViews": buffer_views,
         "accessors": accessors,
         "images": images,
+        "samplers": samplers,
         "textures": textures,
         "materials": materials,
         "meshes": meshes,
@@ -389,7 +391,8 @@ impl MaterialExport<'_> {
             "uri": uri
         }));
         let texture_index = self.textures.len();
-        self.textures.push(json!({ "source": image_index }));
+        self.textures
+            .push(json!({ "sampler": 0, "source": image_index }));
         self.image_indices.insert(source_path, texture_index);
         Ok(Some(texture_index))
     }
@@ -565,8 +568,12 @@ mod tests {
                 .as_nanos()
         ));
         let model_dir = root.join("model");
+        let assets_dir = root.join("assets");
         let buffer_path = root.join("bin").join("triangle.bin");
         fs::create_dir_all(&model_dir).unwrap();
+        let image_path = assets_dir.join("material").join("Plastic_color.png");
+        fs::create_dir_all(image_path.parent().unwrap()).unwrap();
+        fs::write(&image_path, b"\x89PNG\r\n\x1a\n").unwrap();
 
         let model = ModelAsset {
             name: "Triangle".to_owned(),
@@ -619,7 +626,7 @@ mod tests {
         let gltf = model_to_gltf(
             &model,
             &root.join("download"),
-            &root.join("assets"),
+            &assets_dir,
             &model_dir,
             &root,
             &buffer_path,
@@ -627,6 +634,9 @@ mod tests {
         .unwrap();
         let document: Value = serde_json::from_slice(&gltf).unwrap();
         assert_eq!(document["buffers"][0]["uri"], "../bin/triangle.bin");
+        assert_eq!(document["samplers"][0]["wrapS"], 10497);
+        assert_eq!(document["samplers"][0]["wrapT"], 10497);
+        assert_eq!(document["textures"][0]["sampler"], 0);
         assert!(
             !document["buffers"][0]["uri"]
                 .as_str()
