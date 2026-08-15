@@ -26,6 +26,8 @@ struct Cli {
     out_dir: PathBuf,
     #[arg(long, value_name = "DIRECTORY", default_value_os_t = default_assets_dir())]
     assets_dir: PathBuf,
+    #[arg(long, help = "Also package each exported GLTF as a GLB file")]
+    glb: bool,
 }
 
 fn default_output_dir() -> PathBuf {
@@ -52,7 +54,7 @@ fn absolute_path(path: &Path) -> Result<PathBuf, String> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(cli.input, cli.out_dir, cli.assets_dir) {
+    match run(cli.input, cli.out_dir, cli.assets_dir, cli.glb) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
@@ -61,7 +63,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(input: PathBuf, out_dir: PathBuf, assets_dir: PathBuf) -> Result<(), String> {
+fn run(input: PathBuf, out_dir: PathBuf, assets_dir: PathBuf, glb: bool) -> Result<(), String> {
     // Download step
     let download_start_time = std::time::Instant::now();
     let download_out_dir: PathBuf = out_dir.join("download");
@@ -100,6 +102,22 @@ fn run(input: PathBuf, out_dir: PathBuf, assets_dir: PathBuf) -> Result<(), Stri
         model_start_time.elapsed().as_secs_f64()
     );
 
+    if glb {
+        let glb_start_time = std::time::Instant::now();
+        let glb_report = export_glbs(&model_report.models, &out_dir.join("glb"))?;
+        println!(
+            "glb: exported {}, reused {}, failed {} -> {} in {:.2}s",
+            glb_report.exported,
+            glb_report.cached,
+            glb_report.failed.len(),
+            glb_report.output_directory.display(),
+            glb_start_time.elapsed().as_secs_f64()
+        );
+        for failure in &glb_report.failed {
+            eprintln!("failed GLB {}: {}", failure.source, failure.error);
+        }
+    }
+
     Ok(())
 }
 
@@ -118,6 +136,7 @@ struct ModelReport {
     exported: usize,
     cached: usize,
     failed: Vec<ModelFailure>,
+    models: Vec<ModelManifestEntry>,
     output_directory: PathBuf,
 }
 
@@ -127,13 +146,21 @@ struct ModelFailure {
     error: String,
 }
 
+#[derive(Debug)]
+struct GlbReport {
+    exported: usize,
+    cached: usize,
+    failed: Vec<ModelFailure>,
+    output_directory: PathBuf,
+}
+
 #[derive(Debug, Serialize)]
 struct ModelManifest {
     version: u32,
     models: Vec<ModelManifestEntry>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 struct ModelManifestEntry {
     hash: String,
     output: String,
@@ -164,6 +191,7 @@ fn export_models(
         exported: 0,
         cached: 0,
         failed: Vec::new(),
+        models: Vec::new(),
         output_directory: output_dir.to_owned(),
     };
 
@@ -213,12 +241,14 @@ fn export_models(
                 );
             }
             if output_path.is_file() && buffer_output_path.is_file() {
-                manifest_entries.push(ModelManifestEntry {
+                let manifest_entry = ModelManifestEntry {
                     hash: model_hash,
                     output: output_path.display().to_string(),
                     source: source_path.display().to_string(),
                     name: model_asset.name.clone(),
-                });
+                };
+                manifest_entries.push(manifest_entry.clone());
+                report.models.push(manifest_entry);
                 report.cached += 1;
                 continue;
             }
@@ -247,12 +277,14 @@ fn export_models(
                 });
                 continue;
             }
-            manifest_entries.push(ModelManifestEntry {
+            let manifest_entry = ModelManifestEntry {
                 hash: model_hash,
                 output: output_path.display().to_string(),
                 source: source_path.display().to_string(),
                 name: model_asset.name.clone(),
-            });
+            };
+            manifest_entries.push(manifest_entry.clone());
+            report.models.push(manifest_entry);
             report.exported += 1;
         }
     }
@@ -265,6 +297,62 @@ fn export_models(
         .map_err(|error| format!("failed to serialize model manifest: {error}"))?;
     fs::write(output_dir.join("manifest.json"), format!("{manifest}\n"))
         .map_err(|error| format!("failed to write model manifest: {error}"))?;
+
+    Ok(report)
+}
+
+fn export_glbs(models: &[ModelManifestEntry], output_dir: &Path) -> Result<GlbReport, String> {
+    let output_dir = absolute_path(output_dir)?;
+    fs::create_dir_all(&output_dir).map_err(|error| {
+        format!(
+            "failed to create GLB output directory {}: {error}",
+            output_dir.display()
+        )
+    })?;
+    let mut report = GlbReport {
+        exported: 0,
+        cached: 0,
+        failed: Vec::new(),
+        output_directory: output_dir.to_owned(),
+    };
+
+    for model in models {
+        let output_path = output_dir.join(format!("{}.glb", model.hash));
+        if output_path.is_file() {
+            report.cached += 1;
+            continue;
+        }
+
+        let gltf_path = Path::new(&model.output);
+        let gltf = match fs::read(gltf_path) {
+            Ok(gltf) => gltf,
+            Err(error) => {
+                report.failed.push(ModelFailure {
+                    source: model.source.clone(),
+                    error: format!("failed to read GLTF {}: {error}", gltf_path.display()),
+                });
+                continue;
+            }
+        };
+        let glb = match gltf::gltf_to_glb(&gltf, gltf_path) {
+            Ok(glb) => glb,
+            Err(error) => {
+                report.failed.push(ModelFailure {
+                    source: model.source.clone(),
+                    error,
+                });
+                continue;
+            }
+        };
+        if let Err(error) = fs::write(&output_path, glb) {
+            report.failed.push(ModelFailure {
+                source: model.source.clone(),
+                error: format!("failed to write {}: {error}", output_path.display()),
+            });
+            continue;
+        }
+        report.exported += 1;
+    }
 
     Ok(report)
 }

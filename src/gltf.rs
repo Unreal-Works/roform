@@ -2,7 +2,7 @@ use crate::{
     csg::UnionMesh,
     model::{ModelAsset, ModelMaterial},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     fs,
@@ -167,6 +167,116 @@ pub(crate) fn model_to_gltf(
         .map_err(|error| format!("failed to serialize glTF: {error}"))?;
     write_binary_buffer(buffer_output_path, &binary)?;
     Ok(gltf)
+}
+
+pub(crate) fn gltf_to_glb(gltf: &[u8], gltf_path: &Path) -> Result<Vec<u8>, String> {
+    let mut document: Value = serde_json::from_slice(gltf)
+        .map_err(|error| format!("failed to parse GLTF {}: {error}", gltf_path.display()))?;
+    let gltf_dir = gltf_path.parent().ok_or_else(|| {
+        format!(
+            "cannot resolve GLTF resources without a parent directory: {}",
+            gltf_path.display()
+        )
+    })?;
+
+    let buffer_uri = document
+        .get("buffers")
+        .and_then(Value::as_array)
+        .and_then(|buffers| buffers.first())
+        .and_then(|buffer| buffer.get("uri"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "GLTF does not contain an external buffer URI".to_owned())?
+        .to_owned();
+    let mut binary = read_external_resource(&buffer_uri, gltf_dir)?;
+
+    let buffer = document
+        .get_mut("buffers")
+        .and_then(Value::as_array_mut)
+        .and_then(|buffers| buffers.first_mut())
+        .ok_or_else(|| "GLTF does not contain a buffer".to_owned())?;
+    let buffer_object = buffer
+        .as_object_mut()
+        .ok_or_else(|| "GLTF buffer is not an object".to_owned())?;
+    buffer_object.remove("uri");
+
+    let image_count = document
+        .get("images")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    for image_index in 0..image_count {
+        let image_uri = document["images"][image_index]
+            .get("uri")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let Some(image_uri) = image_uri else {
+            continue;
+        };
+        let image_bytes = read_external_resource(&image_uri, gltf_dir)?;
+        pad_to_four(&mut binary, 0);
+        let byte_offset = binary.len();
+        let byte_length = image_bytes.len();
+        binary.extend_from_slice(&image_bytes);
+
+        if document.get("bufferViews").is_none() {
+            document["bufferViews"] = json!([]);
+        }
+        let buffer_view_index = document["bufferViews"].as_array().map_or(0, Vec::len);
+        document["bufferViews"]
+            .as_array_mut()
+            .ok_or_else(|| "GLTF bufferViews is not an array".to_owned())?
+            .push(json!({
+                "buffer": 0,
+                "byteOffset": byte_offset,
+                "byteLength": byte_length
+            }));
+        let image = document["images"][image_index]
+            .as_object_mut()
+            .ok_or_else(|| "GLTF image is not an object".to_owned())?;
+        image.remove("uri");
+        image.insert("bufferView".to_owned(), json!(buffer_view_index));
+    }
+
+    document["buffers"][0]["byteLength"] = json!(binary.len());
+
+    let mut json_chunk = serde_json::to_vec(&document)
+        .map_err(|error| format!("failed to serialize GLB JSON: {error}"))?;
+    pad_to_four(&mut json_chunk, b' ');
+    pad_to_four(&mut binary, 0);
+
+    let total_length = 12usize
+        .checked_add(8)
+        .and_then(|length| length.checked_add(json_chunk.len()))
+        .and_then(|length| length.checked_add(8))
+        .and_then(|length| length.checked_add(binary.len()))
+        .ok_or_else(|| "GLB is too large".to_owned())?;
+    let total_length = u32::try_from(total_length).map_err(|_| "GLB is too large".to_owned())?;
+    let json_length =
+        u32::try_from(json_chunk.len()).map_err(|_| "GLB JSON is too large".to_owned())?;
+    let binary_length =
+        u32::try_from(binary.len()).map_err(|_| "GLB binary chunk is too large".to_owned())?;
+
+    let mut glb = Vec::with_capacity(total_length as usize);
+    glb.extend_from_slice(&0x46546c67u32.to_le_bytes());
+    glb.extend_from_slice(&2u32.to_le_bytes());
+    glb.extend_from_slice(&total_length.to_le_bytes());
+    glb.extend_from_slice(&json_length.to_le_bytes());
+    glb.extend_from_slice(&0x4e4f534au32.to_le_bytes());
+    glb.extend_from_slice(&json_chunk);
+    glb.extend_from_slice(&binary_length.to_le_bytes());
+    glb.extend_from_slice(&0x004e4942u32.to_le_bytes());
+    glb.extend_from_slice(&binary);
+    Ok(glb)
+}
+
+fn read_external_resource(uri: &str, base_dir: &Path) -> Result<Vec<u8>, String> {
+    if uri.starts_with("data:") || uri.contains("://") {
+        return Err(format!(
+            "GLB conversion only supports local external resources, got {uri}"
+        ));
+    }
+    let path = base_dir.join(uri);
+    fs::read(&path)
+        .map_err(|error| format!("failed to read GLTF resource {}: {error}", path.display()))
 }
 
 fn write_binary_buffer(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -396,8 +506,71 @@ fn pad_to_four(bytes: &mut Vec<u8>, value: u8) {
 mod tests {
     use super::*;
     use crate::{csg::UnionVertex, model::ModelPrimitive};
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn packs_external_buffer_and_image_into_glb() {
+        let root = std::env::temp_dir().join(format!(
+            "roform-glb-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let model_dir = root.join("model");
+        let buffer_path = root.join("bin").join("triangle.bin");
+        let image_path = root.join("material").join("triangle.png");
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::create_dir_all(buffer_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(image_path.parent().unwrap()).unwrap();
+        fs::write(&buffer_path, [1, 2, 3, 4]).unwrap();
+        fs::write(&image_path, [5, 6, 7]).unwrap();
+
+        let gltf = serde_json::to_vec(&json!({
+            "asset": { "version": "2.0" },
+            "buffers": [{ "byteLength": 4, "uri": "../bin/triangle.bin" }],
+            "bufferViews": [{ "buffer": 0, "byteLength": 4 }],
+            "images": [{ "mimeType": "image/png", "uri": "../material/triangle.png" }]
+        }))
+        .unwrap();
+        let glb = gltf_to_glb(&gltf, &model_dir.join("triangle.gltf")).unwrap();
+
+        assert_eq!(&glb[0..4], b"glTF");
+        assert_eq!(u32::from_le_bytes(glb[4..8].try_into().unwrap()), 2);
+        assert_eq!(
+            u32::from_le_bytes(glb[8..12].try_into().unwrap()) as usize,
+            glb.len()
+        );
+        let json_length = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        assert_eq!(&glb[16..20], b"JSON");
+        let json_start = 20;
+        let json_end = json_start + json_length;
+        let document: Value = serde_json::from_slice(&glb[json_start..json_end]).unwrap();
+        assert!(document["buffers"][0].get("uri").is_none());
+        assert_eq!(document["buffers"][0]["byteLength"], 7);
+        assert_eq!(document["images"][0]["bufferView"], 1);
+        assert_eq!(document["bufferViews"][1]["byteOffset"], 4);
+        assert_eq!(document["bufferViews"][1]["byteLength"], 3);
+
+        let binary_header_start = json_end;
+        let binary_length = u32::from_le_bytes(
+            glb[binary_header_start..binary_header_start + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        assert_eq!(
+            &glb[binary_header_start + 4..binary_header_start + 8],
+            b"BIN\0"
+        );
+        let binary_start = binary_header_start + 8;
+        assert_eq!(binary_length, 8);
+        assert_eq!(&glb[binary_start..binary_start + 7], [1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(glb[binary_start + 7], 0);
+
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn writes_external_buffer_with_relative_uri() {

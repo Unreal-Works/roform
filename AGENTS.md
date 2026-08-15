@@ -5,6 +5,7 @@ Please update this document after any relevant changes.
 ## Asset Pipeline
 
 - The CLI stages assets as `download`, decoded `mesh`, and hash-keyed `model` GLTF output. Model GLTF files are written below `roform/model/<blake3-hash>.gltf`, with their external buffers in `roform/bin/<blake3-hash>.bin` and source/model names recorded in `roform/model/manifest.json`.
+- Passing `--glb` packages each successful model GLTF, including its buffer and textures, below `roform/glb/<blake3-hash>.glb` after GLTF export.
 - Model export embeds valid images from `assets/material/` as data URIs, using Roblox Material enum values from the official enum documentation when mapping material names. The generated model manifest records absolute source and output paths.
 
 ## Gotchas
