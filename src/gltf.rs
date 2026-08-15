@@ -16,7 +16,7 @@ pub(crate) fn model_to_gltf(
     gltf_output_dir: &Path,
     asset_output_dir: &Path,
     buffer_output_path: &Path,
-    include_materials: bool,
+    include_textures: bool,
 ) -> Result<Vec<u8>, String> {
     if model.primitives.is_empty() {
         return Err("model contains no renderable geometry".to_owned());
@@ -41,6 +41,7 @@ pub(crate) fn model_to_gltf(
         asset_output_dir,
         material_indices: &mut material_indices,
         materials: &mut gltf_materials,
+        include_textures,
         image_indices: &mut image_indices,
         images: &mut images,
         textures: &mut textures,
@@ -128,9 +129,7 @@ pub(crate) fn model_to_gltf(
             "type": "SCALAR"
         }));
 
-        let material_index = include_materials
-            .then(|| material_export.material_index(&primitive.material))
-            .transpose()?;
+        let material_index = material_export.material_index(&primitive.material)?;
         let mut primitive_json = json!({
             "attributes": {
                 "POSITION": position_accessor,
@@ -141,9 +140,7 @@ pub(crate) fn model_to_gltf(
             "indices": index_accessor,
             "mode": 4
         });
-        if let Some(material_index) = material_index {
-            primitive_json["material"] = json!(material_index);
-        }
+        primitive_json["material"] = json!(material_index);
         let mesh_index = meshes.len();
         meshes.push(json!({
             "name": primitive.name.as_str(),
@@ -170,12 +167,12 @@ pub(crate) fn model_to_gltf(
         "scenes": [{ "nodes": (0..nodes.len()).collect::<Vec<_>>() }],
         "scene": 0
     });
-    if include_materials {
+    if include_textures {
         json_value["images"] = json!(images);
         json_value["samplers"] = json!(samplers);
         json_value["textures"] = json!(textures);
-        json_value["materials"] = json!(gltf_materials);
     }
+    json_value["materials"] = json!(gltf_materials);
     let gltf = serde_json::to_vec_pretty(&json_value)
         .map_err(|error| format!("failed to serialize glTF: {error}"))?;
     write_binary_buffer(buffer_output_path, &binary)?;
@@ -312,6 +309,7 @@ struct MaterialExport<'a> {
     asset_output_dir: &'a Path,
     material_indices: &'a mut HashMap<String, usize>,
     materials: &'a mut Vec<serde_json::Value>,
+    include_textures: bool,
     image_indices: &'a mut HashMap<PathBuf, usize>,
     images: &'a mut Vec<serde_json::Value>,
     textures: &'a mut Vec<serde_json::Value>,
@@ -327,8 +325,14 @@ impl MaterialExport<'_> {
             return Ok(*index);
         }
 
-        let base_color = self.material_image(material, true)?;
-        let normal = self.material_image(material, false)?;
+        let (base_color, normal) = if self.include_textures {
+            (
+                self.material_image(material, true)?,
+                self.material_image(material, false)?,
+            )
+        } else {
+            (None, None)
+        };
         let mut pbr = json!({
             "baseColorFactor": material.color,
             "metallicFactor": 0.0,
@@ -615,7 +619,7 @@ mod tests {
                 ],
                 material: ModelMaterial {
                     name: "Plastic".to_owned(),
-                    color: [1.0; 4],
+                    color: [0.25, 0.5, 0.75, 0.5],
                     base_color_asset: None,
                     normal_asset: None,
                 },
@@ -683,13 +687,30 @@ mod tests {
         )
         .unwrap();
         let no_material_document: Value = serde_json::from_slice(&no_material_gltf).unwrap();
-        assert!(no_material_document.get("materials").is_none());
+        assert_eq!(
+            no_material_document["materials"].as_array().unwrap().len(),
+            1
+        );
         assert!(no_material_document.get("images").is_none());
         assert!(no_material_document.get("textures").is_none());
+        assert!(no_material_document.get("samplers").is_none());
+        assert_eq!(
+            no_material_document["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"],
+            json!([0.25, 0.5, 0.75, 0.5])
+        );
         assert!(
-            no_material_document["meshes"][0]["primitives"][0]
-                .get("material")
+            no_material_document["materials"][0]["pbrMetallicRoughness"]
+                .get("baseColorTexture")
                 .is_none()
+        );
+        assert!(
+            no_material_document["materials"][0]
+                .get("normalTexture")
+                .is_none()
+        );
+        assert_eq!(
+            no_material_document["meshes"][0]["primitives"][0]["material"],
+            0
         );
 
         fs::remove_dir_all(root).unwrap();
