@@ -10,7 +10,8 @@ Please update this document after any relevant changes.
 - Model export embeds valid images from `assets/material/` as data URIs, using Roblox Material enum values from the official enum documentation when mapping material names. The generated model manifest records absolute source and output paths.
 - GLTF `extras.roblox` is populated automatically from the Roblox DOM and reflection database: it includes non-default serialized properties, their types, referents, and recursive child instances on the document root, geometry nodes, and their meshes. Properties matching reflection defaults are omitted; unknown serialized properties are retained without an allowlist.
 - The model manifest/cache format is versioned; bump the manifest version and model fingerprint discriminator when changing exported GLTF structure so stale files without metadata are regenerated.
-- Generated primitive UVs use physical surface projections divided by `--studs-per-tile`; cylinder sides follow circumference, spheres follow surface arc lengths, and exported textures reference an explicit GLTF `REPEAT` sampler.
+- Generated primitive UVs use canonical, face-normal-derived physical surface projections divided by `--studs-per-tile`; this keeps texture axes consistent across parts and wedges. Cylinder sides follow circumference, spheres follow surface arc lengths, exported textures reference an explicit GLTF `REPEAT` sampler, and normal-mapped primitives include generated tangent space.
+- `Part`, `WedgePart`, and `CornerWedgePart` instances use generated primitive geometry; legacy `Part.Shape` wedge values use the same generators.
 
 ## Module Boundaries
 

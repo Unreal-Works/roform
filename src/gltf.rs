@@ -1,5 +1,6 @@
 use crate::{
     csg::UnionMesh,
+    geometry,
     model::{ModelAsset, ModelMaterial},
 };
 use serde_json::{Value, json};
@@ -48,6 +49,10 @@ pub(crate) fn model_to_gltf(
     };
 
     for primitive in &model.primitives {
+        let material_index = material_export.material_index(&primitive.material)?;
+        let uses_normal_texture = material_export.materials[material_index]
+            .get("normalTexture")
+            .is_some();
         let vertex_offset = binary.len();
         for vertex in &primitive.mesh.vertices {
             for value in vertex.position {
@@ -70,6 +75,26 @@ pub(crate) fn model_to_gltf(
             "target": 34962
         }));
         let vertex_view = buffer_views.len() - 1;
+
+        let tangent_view = if uses_normal_texture {
+            pad_to_four(&mut binary, 0);
+            let tangent_offset = binary.len();
+            for tangent in geometry::mesh_tangents(&primitive.mesh) {
+                for value in tangent {
+                    binary.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            let tangent_length = binary.len() - tangent_offset;
+            buffer_views.push(json!({
+                "buffer": 0,
+                "byteOffset": tangent_offset,
+                "byteLength": tangent_length,
+                "target": 34962
+            }));
+            Some(buffer_views.len() - 1)
+        } else {
+            None
+        };
 
         pad_to_four(&mut binary, 0);
         let index_offset = binary.len();
@@ -121,6 +146,16 @@ pub(crate) fn model_to_gltf(
             "count": primitive.mesh.vertices.len(),
             "type": "VEC4"
         }));
+        let tangent_accessor = tangent_view.map(|tangent_view| {
+            let tangent_accessor = accessors.len();
+            accessors.push(json!({
+                "bufferView": tangent_view,
+                "componentType": 5126,
+                "count": primitive.mesh.vertices.len(),
+                "type": "VEC4"
+            }));
+            tangent_accessor
+        });
         let index_accessor = accessors.len();
         accessors.push(json!({
             "bufferView": index_view,
@@ -129,14 +164,17 @@ pub(crate) fn model_to_gltf(
             "type": "SCALAR"
         }));
 
-        let material_index = material_export.material_index(&primitive.material)?;
+        let mut attributes = json!({
+            "POSITION": position_accessor,
+            "NORMAL": normal_accessor,
+            "TEXCOORD_0": tex_coord_accessor,
+            "COLOR_0": color_accessor
+        });
+        if let Some(tangent_accessor) = tangent_accessor {
+            attributes["TANGENT"] = json!(tangent_accessor);
+        }
         let mut primitive_json = json!({
-            "attributes": {
-                "POSITION": position_accessor,
-                "NORMAL": normal_accessor,
-                "TEXCOORD_0": tex_coord_accessor,
-                "COLOR_0": color_accessor
-            },
+            "attributes": attributes,
             "indices": index_accessor,
             "mode": 4
         });
@@ -586,6 +624,11 @@ mod tests {
         let image_path = assets_dir.join("material").join("Plastic_color.png");
         fs::create_dir_all(image_path.parent().unwrap()).unwrap();
         fs::write(&image_path, b"\x89PNG\r\n\x1a\n").unwrap();
+        fs::write(
+            assets_dir.join("material").join("Plastic_normal.png"),
+            b"\x89PNG\r\n\x1a\n",
+        )
+        .unwrap();
 
         let model = ModelAsset {
             name: "Triangle".to_owned(),
@@ -651,6 +694,11 @@ mod tests {
         assert_eq!(document["samplers"][0]["wrapT"], 10497);
         assert_eq!(document["textures"][0]["sampler"], 0);
         assert!(
+            document["meshes"][0]["primitives"][0]["attributes"]
+                .get("TANGENT")
+                .is_some()
+        );
+        assert!(
             !document["buffers"][0]["uri"]
                 .as_str()
                 .unwrap()
@@ -673,7 +721,7 @@ mod tests {
             document["meshes"][0]["extras"]["roblox"]["properties"]["Anchored"],
             true
         );
-        assert_eq!(fs::read(&buffer_path).unwrap().len(), 120);
+        assert_eq!(fs::read(&buffer_path).unwrap().len(), 168);
 
         let no_material_buffer_path = root.join("bin").join("triangle-nm.bin");
         let no_material_gltf = model_to_gltf(
@@ -711,6 +759,11 @@ mod tests {
         assert_eq!(
             no_material_document["meshes"][0]["primitives"][0]["material"],
             0
+        );
+        assert!(
+            no_material_document["meshes"][0]["primitives"][0]["attributes"]
+                .get("TANGENT")
+                .is_none()
         );
 
         fs::remove_dir_all(root).unwrap();

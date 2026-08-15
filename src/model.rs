@@ -201,6 +201,7 @@ fn parse_model(
                     Some(primitive_mesh(instance, studs_per_tile))
                 }
             }
+            "WedgePart" | "CornerWedgePart" => Some(primitive_mesh(instance, studs_per_tile)),
             "MeshPart" => {
                 material.base_color_asset = metadata::property_asset_id(instance, "TextureID");
                 let mesh_id = metadata::property_asset_id(instance, "MeshId")
@@ -277,12 +278,16 @@ fn primitive_mesh(instance: &Instance, studs_per_tile: f32) -> UnionMesh {
     let size = metadata::property_vector3(instance, "size")
         .or_else(|| metadata::property_vector3(instance, "Size"))
         .unwrap_or(Vector3::new(1.0, 1.0, 1.0));
-    let shape = instance
-        .properties
-        .get(&"shape".into())
-        .or_else(|| instance.properties.get(&"Shape".into()))
-        .and_then(metadata::enum_value)
-        .unwrap_or(1);
+    let shape = match instance.class.as_str() {
+        "WedgePart" => 3,
+        "CornerWedgePart" => 4,
+        _ => instance
+            .properties
+            .get(&"shape".into())
+            .or_else(|| instance.properties.get(&"Shape".into()))
+            .and_then(metadata::enum_value)
+            .unwrap_or(1),
+    };
     geometry::primitive_mesh(shape, size, studs_per_tile)
 }
 
@@ -578,5 +583,17 @@ mod tests {
         );
 
         assert_eq!(model_roots(&dom), vec![dom.root_ref()]);
+    }
+
+    #[test]
+    fn generates_wedge_geometry_from_wedge_part_class() {
+        let dom = WeakDom::new(
+            InstanceBuilder::new("WedgePart").with_property("Size", Vector3::new(2.0, 4.0, 6.0)),
+        );
+
+        let mesh = primitive_mesh(dom.root(), 2.0);
+
+        assert_eq!(mesh.vertices.len(), 18);
+        assert_eq!(mesh.indices.len(), 24);
     }
 }

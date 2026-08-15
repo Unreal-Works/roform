@@ -11,6 +11,73 @@ pub(crate) fn primitive_mesh(instance_shape: u32, size: Vector3, studs_per_tile:
     }
 }
 
+pub(crate) fn mesh_tangents(mesh: &UnionMesh) -> Vec<[f32; 4]> {
+    let mut tangent_sums = vec![[0.0; 3]; mesh.vertices.len()];
+    let mut bitangent_sums = vec![[0.0; 3]; mesh.vertices.len()];
+    for triangle in mesh.indices.chunks_exact(3) {
+        let [first, second, third] = [
+            triangle[0] as usize,
+            triangle[1] as usize,
+            triangle[2] as usize,
+        ];
+        let (Some(first_vertex), Some(second_vertex), Some(third_vertex)) = (
+            mesh.vertices.get(first),
+            mesh.vertices.get(second),
+            mesh.vertices.get(third),
+        ) else {
+            continue;
+        };
+        let edge_a = subtract(second_vertex.position, first_vertex.position);
+        let edge_b = subtract(third_vertex.position, first_vertex.position);
+        let uv_a = [
+            second_vertex.tex_coord[0] - first_vertex.tex_coord[0],
+            second_vertex.tex_coord[1] - first_vertex.tex_coord[1],
+        ];
+        let uv_b = [
+            third_vertex.tex_coord[0] - first_vertex.tex_coord[0],
+            third_vertex.tex_coord[1] - first_vertex.tex_coord[1],
+        ];
+        let determinant = uv_a[0] * uv_b[1] - uv_a[1] * uv_b[0];
+        if determinant.abs() <= f32::EPSILON {
+            continue;
+        }
+        let inverse = determinant.recip();
+        let tangent = multiply(
+            subtract(multiply(edge_a, uv_b[1]), multiply(edge_b, uv_a[1])),
+            inverse,
+        );
+        let bitangent = multiply(
+            subtract(multiply(edge_b, uv_a[0]), multiply(edge_a, uv_b[0])),
+            inverse,
+        );
+        for index in [first, second, third] {
+            add_assign(&mut tangent_sums[index], tangent);
+            add_assign(&mut bitangent_sums[index], bitangent);
+        }
+    }
+
+    mesh.vertices
+        .iter()
+        .zip(tangent_sums)
+        .zip(bitangent_sums)
+        .map(|((vertex, tangent), bitangent)| {
+            let normal = normalize(vertex.normal);
+            let orthogonal = subtract(tangent, multiply(normal, dot(normal, tangent)));
+            let tangent = if dot(orthogonal, orthogonal) <= f32::EPSILON {
+                perpendicular(normal)
+            } else {
+                normalize(orthogonal)
+            };
+            let handedness = if dot(cross(normal, tangent), bitangent) < 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
+            [tangent[0], tangent[1], tangent[2], handedness]
+        })
+        .collect()
+}
+
 fn box_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
     let x = size.x.abs() * 0.5;
     let y = size.y.abs() * 0.5;
@@ -282,8 +349,8 @@ fn corner_wedge_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
 }
 
 fn add_face_tiled(mesh: &mut UnionMesh, positions: [[f32; 3]; 4], studs_per_tile: f32) {
-    let tex_coords = quad_tex_coords(positions, studs_per_tile);
     let normal = face_normal(positions);
+    let tex_coords = face_tex_coords(positions, normal, studs_per_tile);
     add_face_with_uvs(mesh, positions, tex_coords, normal);
 }
 
@@ -307,8 +374,8 @@ fn add_face_with_uvs(
 }
 
 fn add_triangle_tiled(mesh: &mut UnionMesh, positions: [[f32; 3]; 3], studs_per_tile: f32) {
-    let tex_coords = triangle_tex_coords(positions, studs_per_tile);
     let normal = face_normal([positions[0], positions[1], positions[2], positions[2]]);
+    let tex_coords = face_tex_coords(positions, normal, studs_per_tile);
     add_triangle_with_uvs(mesh, positions, tex_coords, normal);
 }
 
@@ -330,30 +397,32 @@ fn add_triangle_with_uvs(
     mesh.indices.extend([base, base + 1, base + 2]);
 }
 
-fn quad_tex_coords(positions: [[f32; 3]; 4], studs_per_tile: f32) -> [[f32; 2]; 4] {
+fn face_tex_coords<const N: usize>(
+    positions: [[f32; 3]; N],
+    normal: [f32; 3],
+    studs_per_tile: f32,
+) -> [[f32; 2]; N] {
     let tile = studs_per_tile.max(f32::EPSILON);
-    let tangent = normalize(subtract(positions[1], positions[0]));
-    let bitangent = normalize(subtract(positions[3], positions[0]));
-    positions.map(|position| {
-        let offset = subtract(position, positions[0]);
-        [dot(offset, tangent) / tile, dot(offset, bitangent) / tile]
-    })
-}
-
-fn triangle_tex_coords(positions: [[f32; 3]; 3], studs_per_tile: f32) -> [[f32; 2]; 3] {
-    let tile = studs_per_tile.max(f32::EPSILON);
-    let tangent_edge = subtract(positions[1], positions[0]);
-    let tangent_length = length(tangent_edge);
-    let tangent = normalize(tangent_edge);
-    let second_edge = subtract(positions[2], positions[0]);
-    let tangent_offset = dot(second_edge, tangent);
-    let bitangent = normalize(subtract(second_edge, multiply(tangent, tangent_offset)));
-    let bitangent_offset = dot(second_edge, bitangent);
-    [
-        [0.0, 0.0],
-        [tangent_length / tile, 0.0],
-        [tangent_offset / tile, bitangent_offset / tile],
-    ]
+    let reference = least_aligned_axis(normal);
+    let tangent = normalize(subtract(
+        reference,
+        multiply(normal, dot(reference, normal)),
+    ));
+    let bitangent = normalize(cross(normal, tangent));
+    let mut tex_coords = positions.map(|position| {
+        [
+            dot(position, tangent) / tile,
+            dot(position, bitangent) / tile,
+        ]
+    });
+    let minimum = tex_coords.iter().fold([f32::INFINITY; 2], |minimum, uv| {
+        [minimum[0].min(uv[0]), minimum[1].min(uv[1])]
+    });
+    for tex_coord in &mut tex_coords {
+        tex_coord[0] -= minimum[0];
+        tex_coord[1] -= minimum[1];
+    }
+    tex_coords
 }
 
 fn face_normal(positions: [[f32; 3]; 4]) -> [f32; 3] {
@@ -375,6 +444,12 @@ fn multiply(value: [f32; 3], factor: f32) -> [f32; 3] {
     [value[0] * factor, value[1] * factor, value[2] * factor]
 }
 
+fn add_assign(target: &mut [f32; 3], value: [f32; 3]) {
+    for (target, value) in target.iter_mut().zip(value) {
+        *target += value;
+    }
+}
+
 fn dot(first: [f32; 3], second: [f32; 3]) -> f32 {
     first[0] * second[0] + first[1] * second[1] + first[2] * second[2]
 }
@@ -387,8 +462,19 @@ fn cross(first: [f32; 3], second: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-fn length(value: [f32; 3]) -> f32 {
-    dot(value, value).sqrt()
+fn perpendicular(normal: [f32; 3]) -> [f32; 3] {
+    normalize(cross(least_aligned_axis(normal), normal))
+}
+
+fn least_aligned_axis(normal: [f32; 3]) -> [f32; 3] {
+    let absolute = normal.map(f32::abs);
+    if absolute[0] <= absolute[1] && absolute[0] <= absolute[2] {
+        [1.0, 0.0, 0.0]
+    } else if absolute[1] <= absolute[2] {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    }
 }
 
 fn sphere_point(latitude: f32, longitude: f32, radii: [f32; 3]) -> [f32; 3] {
@@ -429,27 +515,9 @@ mod tests {
     fn scales_box_uvs_by_planar_dimensions() {
         let mesh = box_mesh(Vector3::new(2.0, 4.0, 6.0), 2.0);
 
-        assert_eq!(
-            &mesh.vertices[0..4]
-                .iter()
-                .map(|vertex| vertex.tex_coord)
-                .collect::<Vec<_>>(),
-            &[[0.0, 0.0], [2.0, 0.0], [2.0, 3.0], [0.0, 3.0]]
-        );
-        assert_eq!(
-            &mesh.vertices[8..12]
-                .iter()
-                .map(|vertex| vertex.tex_coord)
-                .collect::<Vec<_>>(),
-            &[[0.0, 0.0], [3.0, 0.0], [3.0, 1.0], [0.0, 1.0]]
-        );
-        assert_eq!(
-            &mesh.vertices[16..20]
-                .iter()
-                .map(|vertex| vertex.tex_coord)
-                .collect::<Vec<_>>(),
-            &[[0.0, 0.0], [1.0, 0.0], [1.0, 2.0], [0.0, 2.0]]
-        );
+        assert_uv_extent(&mesh.vertices[0..4], [2.0, 3.0]);
+        assert_uv_extent(&mesh.vertices[8..12], [1.0, 3.0]);
+        assert_uv_extent(&mesh.vertices[16..20], [1.0, 2.0]);
     }
 
     #[test]
@@ -491,9 +559,33 @@ mod tests {
         let mesh = wedge_mesh(Vector3::new(2.0, 4.0, 6.0), 2.0);
         let slope = &mesh.vertices[14..18];
 
-        assert_eq!(slope[0].tex_coord, [0.0, 0.0]);
-        assert_close(slope[1].tex_coord[0], 1.0);
-        assert_close(slope[3].tex_coord[1], 4.0f32.hypot(6.0) / 2.0);
+        assert_uv_extent(slope, [1.0, 4.0f32.hypot(6.0) / 2.0]);
+    }
+
+    #[test]
+    fn wedge_and_box_end_faces_share_uv_axes() {
+        let size = Vector3::new(2.0, 4.0, 6.0);
+        let box_face = box_mesh(size, 2.0);
+        let wedge = wedge_mesh(size, 2.0);
+
+        assert_uv_axes(&box_face.vertices[0..4], 1, 2, 2.0);
+        assert_uv_axes(&wedge.vertices[8..11], 1, 2, 2.0);
+    }
+
+    #[test]
+    fn wedge_and_box_end_faces_share_tangent_axes() {
+        let size = Vector3::new(2.0, 4.0, 6.0);
+        let box_mesh = box_mesh(size, 2.0);
+        let wedge_mesh = wedge_mesh(size, 2.0);
+        let box_tangents = mesh_tangents(&box_mesh);
+        let wedge_tangents = mesh_tangents(&wedge_mesh);
+
+        for tangent in &box_tangents[0..4] {
+            assert_eq!(*tangent, [0.0, 1.0, 0.0, 1.0]);
+        }
+        for tangent in &wedge_tangents[8..11] {
+            assert_eq!(*tangent, [0.0, 1.0, 0.0, 1.0]);
+        }
     }
 
     #[test]
@@ -538,5 +630,43 @@ mod tests {
             (actual - expected).abs() < 1.0e-5,
             "expected {expected}, got {actual}"
         );
+    }
+
+    fn assert_uv_extent(vertices: &[UnionVertex], expected: [f32; 2]) {
+        let minimum = vertices.iter().fold([f32::INFINITY; 2], |minimum, vertex| {
+            [
+                minimum[0].min(vertex.tex_coord[0]),
+                minimum[1].min(vertex.tex_coord[1]),
+            ]
+        });
+        let maximum = vertices
+            .iter()
+            .fold([f32::NEG_INFINITY; 2], |maximum, vertex| {
+                [
+                    maximum[0].max(vertex.tex_coord[0]),
+                    maximum[1].max(vertex.tex_coord[1]),
+                ]
+            });
+        assert_close(maximum[0] - minimum[0], expected[0]);
+        assert_close(maximum[1] - minimum[1], expected[1]);
+    }
+
+    fn assert_uv_axes(
+        vertices: &[UnionVertex],
+        tangent_axis: usize,
+        bitangent_axis: usize,
+        studs_per_tile: f32,
+    ) {
+        for pair in vertices.windows(2) {
+            assert_close(
+                pair[1].tex_coord[0] - pair[0].tex_coord[0],
+                (pair[1].position[tangent_axis] - pair[0].position[tangent_axis]) / studs_per_tile,
+            );
+            assert_close(
+                pair[1].tex_coord[1] - pair[0].tex_coord[1],
+                (pair[1].position[bitangent_axis] - pair[0].position[bitangent_axis])
+                    / studs_per_tile,
+            );
+        }
     }
 }

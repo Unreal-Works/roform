@@ -56,7 +56,7 @@ pub(crate) fn direct_child(dom: &WeakDom, instance: &Instance, class: &str) -> O
 pub(crate) fn is_geometry(instance: &Instance) -> bool {
     matches!(
         instance.class.as_str(),
-        "Part" | "MeshPart" | "UnionOperation"
+        "Part" | "WedgePart" | "CornerWedgePart" | "MeshPart" | "UnionOperation"
     )
 }
 
@@ -320,6 +320,14 @@ mod tests {
             Some("456".to_owned())
         );
         assert_eq!(parse_asset_id("rbxassetid://not-an-id"), None);
+    }
+
+    #[test]
+    fn recognizes_primitive_part_classes_as_geometry() {
+        for class in ["Part", "WedgePart", "CornerWedgePart"] {
+            let dom = WeakDom::new(InstanceBuilder::new(class));
+            assert!(is_geometry(dom.root()), "{class} should be geometry");
+        }
     }
 
     #[test]
