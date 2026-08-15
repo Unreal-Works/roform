@@ -181,7 +181,10 @@ fn parse_model(
                     .or_else(|| property_asset_id(instance, "MeshContent"));
                 match mesh_id {
                     Some(asset_id) => match load_mesh(&asset_id, download_dir, mesh_cache) {
-                        Ok(mesh) => Some(mesh),
+                        Ok(mut mesh) => {
+                            apply_instance_size(&mut mesh, instance);
+                            Some(mesh)
+                        }
                         Err(error) => {
                             warnings.push(format!("{} ({}): {error}", instance.name, asset_id));
                             None
@@ -195,7 +198,10 @@ fn parse_model(
             }
             "UnionOperation" => match property_asset_id(instance, "AssetId") {
                 Some(asset_id) => match load_mesh(&asset_id, download_dir, mesh_cache) {
-                    Ok(mesh) => Some(mesh),
+                    Ok(mut mesh) => {
+                        apply_instance_size(&mut mesh, instance);
+                        Some(mesh)
+                    }
                     Err(error) => {
                         warnings.push(format!("{} ({}): {error}", instance.name, asset_id));
                         None
@@ -283,6 +289,71 @@ fn load_packaged_mesh(path: &Path) -> Result<UnionMesh, String> {
         .ok_or_else(|| format!("{} contains no PartOperationAsset MeshData", path.display()))?;
     decode_mesh_payload(mesh_data)
         .map_err(|error| format!("failed to decode {}: {error}", path.display()))
+}
+
+fn apply_instance_size(mesh: &mut UnionMesh, instance: &Instance) {
+    let Some(size) =
+        property_vector3(instance, "size").or_else(|| property_vector3(instance, "Size"))
+    else {
+        return;
+    };
+    let source_size =
+        property_vector3(instance, "InitialSize").unwrap_or_else(|| mesh_bounds_size(mesh));
+    scale_mesh_to_size(mesh, size, source_size);
+}
+
+fn scale_mesh_to_size(mesh: &mut UnionMesh, target_size: Vector3, source_size: Vector3) {
+    let scale = [
+        size_scale(target_size.x, source_size.x),
+        size_scale(target_size.y, source_size.y),
+        size_scale(target_size.z, source_size.z),
+    ];
+    for vertex in &mut mesh.vertices {
+        for (coordinate, factor) in vertex.position.iter_mut().zip(scale) {
+            *coordinate *= factor;
+        }
+        vertex.normal = normalize([
+            inverse_scale(vertex.normal[0], scale[0]),
+            inverse_scale(vertex.normal[1], scale[1]),
+            inverse_scale(vertex.normal[2], scale[2]),
+        ]);
+    }
+}
+
+fn size_scale(target: f32, source: f32) -> f32 {
+    if source.abs() <= f32::EPSILON {
+        1.0
+    } else {
+        target.abs() / source.abs()
+    }
+}
+
+fn inverse_scale(value: f32, scale: f32) -> f32 {
+    if scale.abs() <= f32::EPSILON {
+        value
+    } else {
+        value / scale
+    }
+}
+
+fn mesh_bounds_size(mesh: &UnionMesh) -> Vector3 {
+    if mesh.vertices.is_empty() {
+        return Vector3::new(1.0, 1.0, 1.0);
+    }
+
+    let mut minimum = [f32::INFINITY; 3];
+    let mut maximum = [f32::NEG_INFINITY; 3];
+    for vertex in &mesh.vertices {
+        for axis in 0..3 {
+            minimum[axis] = minimum[axis].min(vertex.position[axis]);
+            maximum[axis] = maximum[axis].max(vertex.position[axis]);
+        }
+    }
+    Vector3::new(
+        maximum[0] - minimum[0],
+        maximum[1] - minimum[1],
+        maximum[2] - minimum[2],
+    )
 }
 
 fn material_for(dom: &WeakDom, instance: &Instance) -> ModelMaterial {
@@ -973,5 +1044,35 @@ mod tests {
                 .filter(|vertex| vertex.position[1] == 2.0)
                 .all(|vertex| vertex.position == [1.0, 2.0, -3.0])
         );
+    }
+
+    #[test]
+    fn scales_imported_mesh_to_instance_size() {
+        let mut mesh = UnionMesh {
+            vertices: vec![
+                UnionVertex {
+                    position: [-5.0, -1.0, -2.0],
+                    normal: [1.0, 0.0, 0.0],
+                    tex_coord: [0.0, 0.0],
+                    color: [255; 4],
+                },
+                UnionVertex {
+                    position: [5.0, 1.0, 2.0],
+                    normal: [0.0, 1.0, 0.0],
+                    tex_coord: [1.0, 1.0],
+                    color: [255; 4],
+                },
+            ],
+            indices: Vec::new(),
+        };
+
+        scale_mesh_to_size(
+            &mut mesh,
+            Vector3::new(2.0, 4.0, 6.0),
+            Vector3::new(10.0, 2.0, 4.0),
+        );
+
+        assert_eq!(mesh.vertices[0].position, [-1.0, -2.0, -3.0]);
+        assert_eq!(mesh.vertices[1].position, [1.0, 2.0, 3.0]);
     }
 }
