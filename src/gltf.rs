@@ -2,7 +2,6 @@ use crate::{
     csg::UnionMesh,
     model::{ModelAsset, ModelMaterial},
 };
-use base64::Engine;
 use serde_json::json;
 use std::{
     collections::HashMap,
@@ -16,6 +15,7 @@ pub(crate) fn model_to_gltf(
     assets_dir: &Path,
     gltf_output_dir: &Path,
     asset_output_dir: &Path,
+    buffer_output_path: &Path,
 ) -> Result<Vec<u8>, String> {
     if model.primitives.is_empty() {
         return Err("model contains no renderable geometry".to_owned());
@@ -149,10 +149,7 @@ pub(crate) fn model_to_gltf(
         }));
     }
 
-    let binary_uri = format!(
-        "data:application/octet-stream;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(&binary)
-    );
+    let binary_uri = relative_uri(gltf_output_dir, buffer_output_path)?;
     let json_value = json!({
         "asset": { "version": "2.0", "generator": "roform" },
         "buffers": [{ "byteLength": binary.len(), "uri": binary_uri }],
@@ -166,8 +163,23 @@ pub(crate) fn model_to_gltf(
         "scenes": [{ "nodes": (0..nodes.len()).collect::<Vec<_>>() }],
         "scene": 0
     });
-    serde_json::to_vec_pretty(&json_value)
-        .map_err(|error| format!("failed to serialize glTF: {error}"))
+    let gltf = serde_json::to_vec_pretty(&json_value)
+        .map_err(|error| format!("failed to serialize glTF: {error}"))?;
+    write_binary_buffer(buffer_output_path, &binary)?;
+    Ok(gltf)
+}
+
+fn write_binary_buffer(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create GLTF buffer directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(path, bytes)
+        .map_err(|error| format!("failed to write GLTF buffer {}: {error}", path.display()))
 }
 
 fn material_index(
@@ -291,7 +303,11 @@ fn material_image(
     Ok(Some(texture_index))
 }
 
-fn stage_asset(source_path: &Path, assets_dir: &Path, output_dir: &Path) -> Result<PathBuf, String> {
+fn stage_asset(
+    source_path: &Path,
+    assets_dir: &Path,
+    output_dir: &Path,
+) -> Result<PathBuf, String> {
     let Ok(relative_path) = source_path.strip_prefix(assets_dir) else {
         return Ok(source_path.to_owned());
     };
@@ -373,5 +389,93 @@ struct Bounds([f32; 3]);
 fn pad_to_four(bytes: &mut Vec<u8>, value: u8) {
     while bytes.len() % 4 != 0 {
         bytes.push(value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{csg::UnionVertex, model::ModelPrimitive};
+    use serde_json::Value;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn writes_external_buffer_with_relative_uri() {
+        let root = std::env::temp_dir().join(format!(
+            "roform-gltf-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let model_dir = root.join("model");
+        let buffer_path = root.join("bin").join("triangle.bin");
+        fs::create_dir_all(&model_dir).unwrap();
+
+        let model = ModelAsset {
+            name: "Triangle".to_owned(),
+            primitives: vec![ModelPrimitive {
+                name: "TrianglePart".to_owned(),
+                mesh: UnionMesh {
+                    vertices: vec![
+                        UnionVertex {
+                            position: [0.0, 0.0, 0.0],
+                            normal: [0.0, 1.0, 0.0],
+                            tex_coord: [0.0, 0.0],
+                            color: [255; 4],
+                        },
+                        UnionVertex {
+                            position: [1.0, 0.0, 0.0],
+                            normal: [0.0, 1.0, 0.0],
+                            tex_coord: [1.0, 0.0],
+                            color: [255; 4],
+                        },
+                        UnionVertex {
+                            position: [0.0, 1.0, 0.0],
+                            normal: [0.0, 1.0, 0.0],
+                            tex_coord: [0.0, 1.0],
+                            color: [255; 4],
+                        },
+                    ],
+                    indices: vec![0, 1, 2],
+                },
+                matrix: [
+                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+                ],
+                material: ModelMaterial {
+                    name: "Plastic".to_owned(),
+                    color: [1.0; 4],
+                    base_color_asset: None,
+                    normal_asset: None,
+                },
+            }],
+            warnings: Vec::new(),
+        };
+
+        let gltf = model_to_gltf(
+            &model,
+            &root.join("download"),
+            &root.join("assets"),
+            &model_dir,
+            &root,
+            &buffer_path,
+        )
+        .unwrap();
+        let document: Value = serde_json::from_slice(&gltf).unwrap();
+        assert_eq!(document["buffers"][0]["uri"], "../bin/triangle.bin");
+        assert!(
+            !document["buffers"][0]["uri"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:")
+        );
+        assert_eq!(
+            document["buffers"][0]["byteLength"].as_u64(),
+            Some(fs::metadata(&buffer_path).unwrap().len())
+        );
+        assert_eq!(fs::read(&buffer_path).unwrap().len(), 120);
+
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -1553,7 +1553,6 @@ dependencies = [
 name = "roform"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
  "blake3",
  "clap",
  "colored",

@@ -198,6 +198,11 @@ fn export_models(
             );
             let output_name = format!("{model_hash}.gltf");
             let output_path = output_dir.join(&output_name);
+            let buffer_output_path = output_dir
+                .parent()
+                .unwrap_or(&output_dir)
+                .join("bin")
+                .join(format!("{model_hash}.bin"));
 
             for warning in &model_asset.warnings {
                 eprintln!(
@@ -207,7 +212,7 @@ fn export_models(
                     warning
                 );
             }
-            if output_path.is_file() {
+            if output_path.is_file() && buffer_output_path.is_file() {
                 manifest_entries.push(ModelManifestEntry {
                     hash: model_hash,
                     output: output_path.display().to_string(),
@@ -224,6 +229,7 @@ fn export_models(
                 &assets_dir,
                 &output_dir,
                 output_dir.parent().unwrap_or(&output_dir),
+                &buffer_output_path,
             ) {
                 Ok(gltf) => gltf,
                 Err(error) => {
