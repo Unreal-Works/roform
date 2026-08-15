@@ -4,6 +4,7 @@ mod model;
 
 use clap::Parser;
 use mhif::{DownloadOptions, download_assets, extract_asset_ids_cached};
+use serde::Serialize;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -107,7 +108,6 @@ fn run(input: PathBuf, out_dir: PathBuf, assets_dir: PathBuf) -> Result<(), Stri
 
     Ok(())
 }
-
 #[derive(Debug)]
 struct MeshReport {
     decoded: usize,
@@ -242,6 +242,20 @@ struct ModelFailure {
     error: String,
 }
 
+#[derive(Debug, Serialize)]
+struct ModelManifest {
+    version: u32,
+    models: Vec<ModelManifestEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct ModelManifestEntry {
+    hash: String,
+    output: String,
+    source: String,
+    name: String,
+}
+
 fn export_models(
     input: &Path,
     download_dir: &Path,
@@ -254,16 +268,10 @@ fn export_models(
             output_dir.display()
         )
     })?;
-    let fingerprint_dir = output_dir.join(".fingerprint");
-    fs::create_dir_all(&fingerprint_dir).map_err(|error| {
-        format!(
-            "failed to create model fingerprint directory {}: {error}",
-            fingerprint_dir.display()
-        )
-    })?;
 
     let source_files = model::source_files(input)?;
     let dependency_fingerprint = tree_fingerprint(download_dir, assets_dir)?;
+    let mut manifest_entries = Vec::new();
     let mut report = ModelReport {
         exported: 0,
         cached: 0,
@@ -292,38 +300,15 @@ fn export_models(
                 continue;
             }
         };
-        let source_name = source_path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or("model");
-        let source_output_dir = output_dir.join(sanitize_path_component(source_name));
-        let source_fingerprint_dir = fingerprint_dir.join(sanitize_path_component(source_name));
-        fs::create_dir_all(&source_output_dir).map_err(|error| {
-            format!(
-                "failed to create model output directory {}: {error}",
-                source_output_dir.display()
-            )
-        })?;
-        fs::create_dir_all(&source_fingerprint_dir).map_err(|error| {
-            format!(
-                "failed to create model fingerprint directory {}: {error}",
-                source_fingerprint_dir.display()
-            )
-        })?;
-
-        let mut model_names = std::collections::HashMap::<String, usize>::new();
-        for model_asset in models {
-            let model_name = sanitize_path_component(&model_asset.name);
-            let occurrence = model_names.entry(model_name.clone()).or_default();
-            *occurrence += 1;
-            let output_name = if *occurrence == 1 {
-                model_name
-            } else {
-                format!("{model_name}-{}", *occurrence)
-            };
-            let output_path = source_output_dir.join(format!("{output_name}.gltf"));
-            let fingerprint_path = source_fingerprint_dir.join(format!("{output_name}.blake3"));
-            let fingerprint = model_fingerprint(&source_bytes, &dependency_fingerprint, &model_asset);
+        for (model_index, model_asset) in models.into_iter().enumerate() {
+            let model_hash = model_fingerprint(
+                &source_bytes,
+                &dependency_fingerprint,
+                &model_asset,
+                model_index,
+            );
+            let output_name = format!("{model_hash}.gltf");
+            let output_path = output_dir.join(&output_name);
 
             for warning in &model_asset.warnings {
                 eprintln!(
@@ -333,11 +318,13 @@ fn export_models(
                     warning
                 );
             }
-            if output_path.is_file()
-                && fs::read_to_string(&fingerprint_path)
-                    .map(|cached_fingerprint| cached_fingerprint.trim() == fingerprint)
-                    .unwrap_or(false)
-            {
+            if output_path.is_file() {
+                manifest_entries.push(ModelManifestEntry {
+                    hash: model_hash,
+                    output: output_name,
+                    source: source_path.display().to_string(),
+                    name: model_asset.name.clone(),
+                });
                 report.cached += 1;
                 continue;
             }
@@ -359,16 +346,24 @@ fn export_models(
                 });
                 continue;
             }
-            if let Err(error) = fs::write(&fingerprint_path, fingerprint) {
-                report.failed.push(ModelFailure {
-                    source: format!("{} / {}", source_path.display(), model_asset.name),
-                    error: format!("failed to write {}: {error}", fingerprint_path.display()),
-                });
-                continue;
-            }
+            manifest_entries.push(ModelManifestEntry {
+                hash: model_hash,
+                output: output_name,
+                source: source_path.display().to_string(),
+                name: model_asset.name.clone(),
+            });
             report.exported += 1;
         }
     }
+
+    let manifest = ModelManifest {
+        version: 1,
+        models: manifest_entries,
+    };
+    let manifest = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("failed to serialize model manifest: {error}"))?;
+    fs::write(output_dir.join("manifest.json"), format!("{manifest}\n"))
+        .map_err(|error| format!("failed to write model manifest: {error}"))?;
 
     Ok(report)
 }
@@ -377,11 +372,14 @@ fn model_fingerprint(
     source_bytes: &[u8],
     dependency_fingerprint: &str,
     model: &model::ModelAsset,
+    model_index: usize,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
+    hasher.update(b"roform-model-v1");
     hasher.update(source_bytes);
     hasher.update(dependency_fingerprint.as_bytes());
     hasher.update(model.name.as_bytes());
+    hasher.update(model_index.to_string().as_bytes());
     hasher.update(model.primitives.len().to_string().as_bytes());
     hasher.finalize().to_hex().to_string()
 }
@@ -410,31 +408,20 @@ fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
     if !path.is_dir() {
         return Ok(());
     }
-    let entries = fs::read_dir(path)
-        .map_err(|error| format!("failed to read dependency directory {}: {error}", path.display()))?;
+    let entries = fs::read_dir(path).map_err(|error| {
+        format!(
+            "failed to read dependency directory {}: {error}",
+            path.display()
+        )
+    })?;
     for entry in entries {
         let entry = entry.map_err(|error| {
-            format!("failed to inspect dependency directory {}: {error}", path.display())
+            format!(
+                "failed to inspect dependency directory {}: {error}",
+                path.display()
+            )
         })?;
         collect_files(&entry.path(), files)?;
     }
     Ok(())
-}
-
-fn sanitize_path_component(value: &str) -> String {
-    let sanitized: String = value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if sanitized.is_empty() {
-        "model".to_owned()
-    } else {
-        sanitized
-    }
 }

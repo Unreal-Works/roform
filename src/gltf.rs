@@ -221,7 +221,8 @@ pub(crate) fn model_to_gltf(
         "scenes": [{ "nodes": (0..nodes.len()).collect::<Vec<_>>() }],
         "scene": 0
     });
-    serde_json::to_vec_pretty(&json_value).map_err(|error| format!("failed to serialize glTF: {error}"))
+    serde_json::to_vec_pretty(&json_value)
+        .map_err(|error| format!("failed to serialize glTF: {error}"))
 }
 
 fn material_index(
