@@ -74,15 +74,26 @@ struct FingerprintCacheEntry {
     hash: String,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ModelExportOptions {
+    pub studs_per_tile: f32,
+    pub includes_materials: bool,
+    pub recompile: bool,
+}
+
 pub(crate) fn export_models(
     input: &Path,
     download_dir: &Path,
     mesh_dir: &Path,
     assets_dir: &Path,
     output_dir: &Path,
-    studs_per_tile: f32,
-    includes_materials: bool,
+    options: ModelExportOptions,
 ) -> Result<ModelReport, String> {
+    let ModelExportOptions {
+        studs_per_tile,
+        includes_materials,
+        recompile,
+    } = options;
     let download_dir = absolute_path(download_dir)?;
     let mesh_dir = absolute_path(mesh_dir)?;
     let assets_dir = absolute_path(assets_dir)?;
@@ -109,11 +120,42 @@ pub(crate) fn export_models(
         .iter()
         .map(|entry| (entry.source.clone(), entry.hash.clone()))
         .collect::<HashMap<_, _>>();
-    let previous_manifest = reusable_manifest(&output_dir, studs_per_tile, includes_materials);
+    let previous_manifest = if recompile {
+        None
+    } else {
+        reusable_manifest(&output_dir, studs_per_tile, includes_materials)
+    };
     let mut fingerprints = FingerprintState::load(&mesh_dir.join("fingerprint.json"));
-    let mut manifest_entries = Vec::new();
-    let mut manifest_dependencies = BTreeMap::new();
-    let mut manifest_sources = Vec::new();
+    let current_sources = source_files
+        .iter()
+        .map(|path| cache_path(path))
+        .collect::<HashSet<_>>();
+    let mut manifest_entries = previous_manifest
+        .as_ref()
+        .map(|manifest| {
+            manifest
+                .models
+                .iter()
+                .filter(|model| !current_sources.contains(&model.source))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut manifest_sources = previous_manifest
+        .as_ref()
+        .map(|manifest| {
+            manifest
+                .sources
+                .iter()
+                .filter(|source| !current_sources.contains(&source.source))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut manifest_dependencies = previous_manifest
+        .as_ref()
+        .map(|manifest| manifest.dependencies.clone())
+        .unwrap_or_default();
     let mut report = ModelReport {
         exported: 0,
         cached: 0,
@@ -123,7 +165,7 @@ pub(crate) fn export_models(
     };
 
     for source_path in source_files {
-        let source = source_path.display().to_string();
+        let source = cache_path(&source_path);
         if let Some(source_hash) = source_hashes.get(&source)
             && let Some(previous_manifest) = &previous_manifest
             && let Some((models, dependencies)) = reusable_source_models(
@@ -212,11 +254,11 @@ pub(crate) fn export_models(
                     warning
                 );
             }
-            if output_path.is_file() && buffer_output_path.is_file() {
+            if !recompile && output_path.is_file() && buffer_output_path.is_file() {
                 let manifest_entry = ModelManifestEntry {
                     hash: model_hash,
-                    output: output_path.display().to_string(),
-                    source: source_path.display().to_string(),
+                    output: cache_path(&output_path),
+                    source: source.clone(),
                     name: model_asset.name.clone(),
                 };
                 manifest_entries.push(manifest_entry.clone());
@@ -252,8 +294,8 @@ pub(crate) fn export_models(
             }
             let manifest_entry = ModelManifestEntry {
                 hash: model_hash,
-                output: output_path.display().to_string(),
-                source: source_path.display().to_string(),
+                output: cache_path(&output_path),
+                source: source.clone(),
                 name: model_asset.name.clone(),
             };
             manifest_entries.push(manifest_entry.clone());
@@ -282,6 +324,7 @@ pub(crate) fn export_models(
 pub(crate) fn export_glbs(
     models: &[ModelManifestEntry],
     output_dir: &Path,
+    recompile: bool,
 ) -> Result<GlbReport, String> {
     let output_dir = absolute_path(output_dir)?;
     fs::create_dir_all(&output_dir).map_err(|error| {
@@ -303,7 +346,7 @@ pub(crate) fn export_glbs(
             .and_then(|stem| stem.to_str())
             .ok_or_else(|| format!("invalid GLTF output path: {}", model.output))?;
         let output_path = output_dir.join(format!("{output_stem}.glb"));
-        if output_path.is_file() {
+        if !recompile && output_path.is_file() {
             report.cached += 1;
             continue;
         }
@@ -352,6 +395,10 @@ fn absolute_path(path: &Path) -> Result<PathBuf, String> {
         .map_err(|error| format!("failed to determine the current working directory: {error}"))
 }
 
+fn cache_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 fn model_fingerprint(
     source_bytes: &[u8],
     model: &ModelAsset,
@@ -362,9 +409,6 @@ fn model_fingerprint(
     let mut hasher = blake3::Hasher::new();
     hasher.update(format!("roform-model-v{MODEL_FORMAT_VERSION}").as_bytes());
     hasher.update(source_bytes);
-    let model_bytes = serde_json::to_vec(model)
-        .map_err(|error| format!("failed to serialize model for cache fingerprint: {error}"))?;
-    hasher.update(&model_bytes);
     hasher.update(model_index.to_string().as_bytes());
     hasher.update(&studs_per_tile.to_le_bytes());
     hasher.update(&[context.includes_materials as u8]);
@@ -374,7 +418,7 @@ fn model_fingerprint(
         context.assets_dir,
         context.includes_materials,
     ) {
-        hasher.update(path.to_string_lossy().as_bytes());
+        hasher.update(cache_path(&path).as_bytes());
         hasher.update(context.fingerprints.fingerprint(&path)?.as_bytes());
     }
     Ok(hasher.finalize().to_hex().to_string())
@@ -391,7 +435,7 @@ fn source_manifest_entries(paths: &[PathBuf]) -> Option<Vec<ModelSourceManifestE
         .map(|path| {
             let bytes = fs::read(path).ok()?;
             Some(ModelSourceManifestEntry {
-                source: path.display().to_string(),
+                source: cache_path(path),
                 hash: blake3::hash(&bytes).to_hex().to_string(),
                 dependencies: Vec::new(),
             })
@@ -412,7 +456,37 @@ fn reusable_manifest(
     {
         return None;
     }
-    Some(manifest)
+    Some(normalize_manifest_paths(manifest))
+}
+
+fn normalize_manifest_paths(mut manifest: ModelManifest) -> ModelManifest {
+    manifest.dependencies = manifest
+        .dependencies
+        .into_iter()
+        .map(|(path, hash)| (cache_path(Path::new(&path)), hash))
+        .collect();
+    for source in &mut manifest.sources {
+        source.source = cache_path(Path::new(&source.source));
+        source.dependencies = source
+            .dependencies
+            .iter()
+            .map(|path| cache_path(Path::new(path)))
+            .collect();
+    }
+    for model in &mut manifest.models {
+        model.output = cache_path(Path::new(&model.output));
+        model.source = cache_path(Path::new(&model.source));
+    }
+    manifest
+}
+
+fn normalize_fingerprint_cache(mut cache: FingerprintCache) -> FingerprintCache {
+    cache.files = cache
+        .files
+        .into_iter()
+        .map(|(path, entry)| (cache_path(Path::new(&path)), entry))
+        .collect();
+    cache
 }
 
 fn reusable_source_models(
@@ -485,7 +559,7 @@ fn source_dependencies(
     let mut dependencies = BTreeMap::new();
     for path in paths {
         let hash = fingerprints.fingerprint(&path)?;
-        dependencies.insert(path.display().to_string(), hash);
+        dependencies.insert(cache_path(&path), hash);
     }
     Ok(dependencies)
 }
@@ -527,11 +601,12 @@ struct ModelFingerprintContext<'a> {
 }
 
 impl FingerprintState {
-    fn load(cache_path: &Path) -> Self {
-        let previous = fs::read(cache_path)
+    fn load(fingerprint_path: &Path) -> Self {
+        let previous = fs::read(fingerprint_path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<FingerprintCache>(&bytes).ok())
-            .filter(|cache| cache.version == MODEL_FORMAT_VERSION);
+            .filter(|cache| cache.version == MODEL_FORMAT_VERSION)
+            .map(normalize_fingerprint_cache);
         Self {
             previous,
             current: HashMap::new(),
@@ -539,7 +614,7 @@ impl FingerprintState {
     }
 
     fn fingerprint(&mut self, path: &Path) -> Result<String, String> {
-        let path_string = path.to_string_lossy().into_owned();
+        let path_string = cache_path(path);
         let metadata = match fs::metadata(path) {
             Ok(metadata) if metadata.is_file() => metadata,
             Ok(_) => {
@@ -698,8 +773,11 @@ mod tests {
             &root.join("mesh"),
             &root.join("assets"),
             &root.join("model"),
-            1.0,
-            true,
+            ModelExportOptions {
+                studs_per_tile: 1.0,
+                includes_materials: true,
+                recompile: false,
+            },
         )
         .unwrap();
         assert!(!first.models.is_empty());
@@ -723,12 +801,56 @@ mod tests {
             &root.join("mesh"),
             &root.join("assets"),
             &root.join("model"),
-            1.0,
-            true,
+            ModelExportOptions {
+                studs_per_tile: 1.0,
+                includes_materials: true,
+                recompile: false,
+            },
         )
         .unwrap();
         assert_eq!(second.exported, 0);
         assert_eq!(second.cached, first.models.len());
+
+        let single_source_path = PathBuf::from(format!(
+            "{}/model.rbxmx",
+            input_dir.to_string_lossy().replace('\\', "/")
+        ));
+        let expected_single_models = first
+            .models
+            .iter()
+            .filter(|model| model.source == cache_path(&input_dir.join("model.rbxmx")))
+            .count();
+        let single_source = export_models(
+            &single_source_path,
+            &root.join("download"),
+            &root.join("mesh"),
+            &root.join("assets"),
+            &root.join("model"),
+            ModelExportOptions {
+                studs_per_tile: 1.0,
+                includes_materials: true,
+                recompile: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(single_source.exported, 0);
+        assert_eq!(single_source.cached, expected_single_models);
+
+        let directory_after_single_source = export_models(
+            &input_dir,
+            &root.join("download"),
+            &root.join("mesh"),
+            &root.join("assets"),
+            &root.join("model"),
+            ModelExportOptions {
+                studs_per_tile: 1.0,
+                includes_materials: true,
+                recompile: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(directory_after_single_source.exported, 0);
+        assert_eq!(directory_after_single_source.cached, first.models.len());
 
         let third = export_models(
             &input_dir,
@@ -736,12 +858,46 @@ mod tests {
             &root.join("mesh"),
             &root.join("assets"),
             &root.join("model"),
-            1.0,
-            true,
+            ModelExportOptions {
+                studs_per_tile: 1.0,
+                includes_materials: true,
+                recompile: false,
+            },
         )
         .unwrap();
         assert_eq!(third.exported, 0);
         assert_eq!(third.cached, first.models.len());
+
+        let recompiled = export_models(
+            &input_dir,
+            &root.join("download"),
+            &root.join("mesh"),
+            &root.join("assets"),
+            &root.join("model"),
+            ModelExportOptions {
+                studs_per_tile: 1.0,
+                includes_materials: true,
+                recompile: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(recompiled.exported, first.models.len());
+        assert_eq!(recompiled.cached, 0);
+
+        let first_glb = export_glbs(&recompiled.models, &root.join("glb"), false).unwrap();
+        assert_eq!(
+            first_glb.exported + first_glb.cached,
+            recompiled.models.len()
+        );
+        assert!(first_glb.exported > 0);
+
+        let cached_glb = export_glbs(&recompiled.models, &root.join("glb"), false).unwrap();
+        assert_eq!(cached_glb.exported, 0);
+        assert_eq!(cached_glb.cached, recompiled.models.len());
+
+        let recompiled_glb = export_glbs(&recompiled.models, &root.join("glb"), true).unwrap();
+        assert_eq!(recompiled_glb.exported, recompiled.models.len());
+        assert_eq!(recompiled_glb.cached, 0);
 
         fs::remove_dir_all(root).unwrap();
     }

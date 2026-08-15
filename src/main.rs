@@ -27,6 +27,11 @@ struct Cli {
     #[arg(long, help = "Also package each exported GLTF as a GLB file")]
     glb: bool,
     #[arg(
+        long,
+        help = "Ignore cached model outputs and re-export GLTF and GLB files"
+    )]
+    recompile: bool,
+    #[arg(
         long = "no-materials",
         default_value_t = true,
         action = ArgAction::SetFalse,
@@ -61,6 +66,7 @@ fn main() -> ExitCode {
         cli.out_dir,
         cli.assets_dir,
         cli.glb,
+        cli.recompile,
         cli.materials,
         cli.studs_per_tile,
     ) {
@@ -77,6 +83,7 @@ fn run(
     out_dir: PathBuf,
     assets_dir: PathBuf,
     glb: bool,
+    recompile: bool,
     materials: bool,
     studs_per_tile: f32,
 ) -> Result<(), String> {
@@ -112,8 +119,11 @@ fn run(
         &out_dir.join("mesh"),
         &assets_dir,
         &out_dir.join("model"),
-        studs_per_tile,
-        materials,
+        pipeline::ModelExportOptions {
+            studs_per_tile,
+            includes_materials: materials,
+            recompile,
+        },
     )?;
     for failure in &model_report.failed {
         eprintln!("failed model {}: {}", failure.source, failure.error);
@@ -129,7 +139,8 @@ fn run(
 
     if glb {
         let glb_start_time = std::time::Instant::now();
-        let glb_report = pipeline::export_glbs(&model_report.models, &out_dir.join("glb"))?;
+        let glb_report =
+            pipeline::export_glbs(&model_report.models, &out_dir.join("glb"), recompile)?;
         println!(
             "glb: exported {}, reused {}, failed {} -> {} in {:.2}s",
             glb_report.exported,
@@ -158,5 +169,8 @@ mod tests {
         let no_materials_cli =
             Cli::try_parse_from(["roform", "input.rbxmx", "--no-materials"]).unwrap();
         assert!(!no_materials_cli.materials);
+
+        let recompile_cli = Cli::try_parse_from(["roform", "input.rbxmx", "--recompile"]).unwrap();
+        assert!(recompile_cli.recompile);
     }
 }
