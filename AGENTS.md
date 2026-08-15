@@ -19,3 +19,4 @@ Please update this document after any relevant changes.
 5. Downloaded union `.rbxm` packages store geometry in `PartOperationAsset.MeshData` as a `BinaryString`; raw mesh downloads use `asset.bin`.
 6. Imported `MeshPart` and `UnionOperation` geometry is scaled by `size / InitialSize`; when `InitialSize` is absent, use decoded mesh bounds as the source size.
 7. Reflection-enabled Roblox XML canonicalizes the `Color3uint8` XML property to the DOM key `Color`; retain the raw key as a fallback for no-reflection input.
+8. Generated primitive mesh topology and normals are part of the model export format; bump `MODEL_FORMAT_VERSION` when changing them so cached GLTF files are regenerated.

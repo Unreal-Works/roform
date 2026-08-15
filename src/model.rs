@@ -670,9 +670,9 @@ fn wedge_mesh(size: Vector3) -> UnionMesh {
         &mut mesh,
         [
             p([-x, -y, -z]),
-            p([-x, -y, z]),
-            p([x, -y, z]),
             p([x, -y, -z]),
+            p([x, -y, z]),
+            p([-x, -y, z]),
         ],
         n([0.0, -1.0, 0.0]),
     );
@@ -681,34 +681,28 @@ fn wedge_mesh(size: Vector3) -> UnionMesh {
         &mut mesh,
         [
             p([-x, -y, -z]),
-            p([x, -y, -z]),
-            p([x, y, -z]),
             p([-x, y, -z]),
+            p([x, y, -z]),
+            p([x, -y, -z]),
         ],
         n([0.0, 0.0, -1.0]),
     );
 
-    add_face(
+    add_triangle(
         &mut mesh,
-        [
-            p([-x, -y, z]),
-            p([-x, y, -z]),
-            p([-x, -y, -z]),
-            p([-x, y, -z]),
-        ],
+        [p([-x, -y, z]), p([-x, y, -z]), p([-x, -y, -z])],
         n([-1.0, 0.0, 0.0]),
     );
 
-    add_face(
+    add_triangle(
         &mut mesh,
-        [p([x, -y, -z]), p([x, -y, z]), p([x, y, -z]), p([x, y, -z])],
+        [p([x, -y, -z]), p([x, y, -z]), p([x, -y, z])],
         n([1.0, 0.0, 0.0]),
     );
 
     let base = mesh.vertices.len() as u32;
 
-    // Original [0, 1, 1] rotated 180° around Z => [0, -1, 1].
-    let slope_normal = normalize(n([0.0, 1.0, 1.0]));
+    let slope_normal = normalize([0.0, z, -y]);
 
     mesh.vertices.extend([
         UnionVertex {
@@ -1206,6 +1200,43 @@ mod tests {
                 .filter(|vertex| vertex.position[1] == 2.0)
                 .all(|vertex| vertex.position == [1.0, 2.0, -3.0])
         );
+    }
+
+    #[test]
+    fn wedge_normals_match_dimensions_and_triangle_winding() {
+        let mesh = wedge_mesh(Vector3::new(2.0, 4.0, 6.0));
+
+        assert_eq!(mesh.vertices.len(), 18);
+        assert_eq!(mesh.indices.len(), 24);
+        assert_eq!(mesh.vertices[14].normal, normalize([0.0, 3.0, -2.0]));
+        assert!(mesh.indices.chunks_exact(3).all(|triangle| {
+            let first = mesh.vertices[triangle[0] as usize].position;
+            let second = mesh.vertices[triangle[1] as usize].position;
+            let third = mesh.vertices[triangle[2] as usize].position;
+            let first_edge = [
+                second[0] - first[0],
+                second[1] - first[1],
+                second[2] - first[2],
+            ];
+            let second_edge = [
+                third[0] - first[0],
+                third[1] - first[1],
+                third[2] - first[2],
+            ];
+            let cross = [
+                first_edge[1] * second_edge[2] - first_edge[2] * second_edge[1],
+                first_edge[2] * second_edge[0] - first_edge[0] * second_edge[2],
+                first_edge[0] * second_edge[1] - first_edge[1] * second_edge[0],
+            ];
+            let normal = mesh.vertices[triangle[0] as usize].normal;
+            let area_squared = cross.iter().map(|value| value * value).sum::<f32>();
+            let winding_alignment = cross
+                .iter()
+                .zip(normal)
+                .map(|(cross_value, normal_value)| cross_value * normal_value)
+                .sum::<f32>();
+            area_squared > f32::EPSILON && winding_alignment > f32::EPSILON
+        }));
     }
 
     #[test]
