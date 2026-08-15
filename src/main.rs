@@ -104,6 +104,13 @@ fn decode_downloaded_meshes(download_dir: &Path, output_dir: &Path) -> Result<Me
             output_dir.display()
         )
     })?;
+    let fingerprint_dir = output_dir.join(".fingerprint");
+    fs::create_dir_all(&fingerprint_dir).map_err(|error| {
+        format!(
+            "failed to create mesh fingerprint directory {}: {error}",
+            fingerprint_dir.display()
+        )
+    })?;
 
     let mut report = MeshReport {
         decoded: 0,
@@ -148,7 +155,7 @@ fn decode_downloaded_meshes(download_dir: &Path, output_dir: &Path) -> Result<Me
         };
         let fingerprint = blake3::hash(&bytes).to_hex().to_string();
         let output_path = output_dir.join(format!("{asset_id}.glb"));
-        let fingerprint_path = output_dir.join(format!("{asset_id}.blake3"));
+        let fingerprint_path = fingerprint_dir.join(format!("{asset_id}.blake3"));
         if output_path.is_file()
             && fs::read_to_string(&fingerprint_path)
                 .map(|cached_fingerprint| cached_fingerprint.trim() == fingerprint)
