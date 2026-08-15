@@ -1,13 +1,12 @@
 use crate::{
-    csg::{self, UnionMesh, UnionVertex},
-    decode_mesh_payload,
+    csg::{self, UnionMesh},
+    geometry, metadata,
 };
 use rbx_dom_weak::{Instance, WeakDom, types::Ref};
-use rbx_reflection::{DataType, ReflectionDatabase};
 use rbx_types::{CFrame, Variant, Vector3};
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::HashMap,
     fs,
     io::BufReader,
     path::{Path, PathBuf},
@@ -121,14 +120,14 @@ fn collect_source_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), Str
 fn model_roots(dom: &WeakDom) -> Vec<Ref> {
     let mut roots = Vec::new();
     let root_ref = dom.root_ref();
-    if is_class(dom.root(), "Model") {
+    if metadata::is_class(dom.root(), "Model") {
         roots.push(root_ref);
     }
     for instance in dom.descendants() {
-        if is_class(instance, "Model")
+        if metadata::is_class(instance, "Model")
             && !dom
                 .ancestors_of(instance.referent())
-                .any(|ancestor| is_class(ancestor, "Model"))
+                .any(|ancestor| metadata::is_class(ancestor, "Model"))
         {
             roots.push(instance.referent());
         }
@@ -151,19 +150,19 @@ fn parse_model(
     let root = dom
         .get_by_ref(root_ref)
         .ok_or_else(|| "model root referent is missing from the DOM".to_owned())?;
-    let reflection_database = reflection_database();
-    let model_extras = roblox_instance_extras(dom, root_ref, reflection_database);
-    let pivot = property_cframe(root, "WorldPivotData")
-        .or_else(|| property_cframe(root, "ModelMeshCFrame"))
+    let reflection_database = metadata::reflection_database();
+    let model_extras = metadata::roblox_instance_extras(dom, root_ref, reflection_database);
+    let pivot = metadata::property_cframe(root, "WorldPivotData")
+        .or_else(|| metadata::property_cframe(root, "ModelMeshCFrame"))
         .unwrap_or_else(CFrame::identity);
 
     let mut geometry_refs = Vec::new();
-    if is_geometry(root) {
+    if metadata::is_geometry(root) {
         geometry_refs.push(root_ref);
     }
     geometry_refs.extend(
         dom.descendants_of(root_ref)
-            .filter(|instance| is_geometry(instance))
+            .filter(|instance| metadata::is_geometry(instance))
             .map(Instance::referent),
     );
 
@@ -173,16 +172,18 @@ fn parse_model(
         let instance = dom
             .get_by_ref(geometry_ref)
             .ok_or_else(|| "model geometry referent is missing from the DOM".to_owned())?;
-        let cframe = property_cframe(instance, "CFrame").unwrap_or_else(CFrame::identity);
+        let cframe = metadata::property_cframe(instance, "CFrame").unwrap_or_else(CFrame::identity);
         let matrix = relative_matrix(pivot, cframe);
-        let mut material = material_for(dom, instance);
+        let mut material = metadata::material_for(dom, instance);
         let mesh = match instance.class.as_str() {
             "Part" => {
-                if let Some(special_mesh_ref) = direct_child(dom, instance, "SpecialMesh") {
+                if let Some(special_mesh_ref) = metadata::direct_child(dom, instance, "SpecialMesh")
+                {
                     let special_mesh = dom.get_by_ref(special_mesh_ref).expect("valid child ref");
-                    if let Some(asset_id) = property_asset_id(special_mesh, "MeshId") {
-                        material.base_color_asset = property_asset_id(special_mesh, "TextureId")
-                            .or_else(|| property_asset_id(special_mesh, "TextureID"));
+                    if let Some(asset_id) = metadata::property_asset_id(special_mesh, "MeshId") {
+                        material.base_color_asset =
+                            metadata::property_asset_id(special_mesh, "TextureId")
+                                .or_else(|| metadata::property_asset_id(special_mesh, "TextureID"));
                         match load_mesh(&asset_id, download_dir, mesh_dir, mesh_cache) {
                             Ok(mut mesh) => {
                                 apply_special_mesh_transform(&mut mesh, special_mesh);
@@ -201,9 +202,9 @@ fn parse_model(
                 }
             }
             "MeshPart" => {
-                material.base_color_asset = property_asset_id(instance, "TextureID");
-                let mesh_id = property_asset_id(instance, "MeshId")
-                    .or_else(|| property_asset_id(instance, "MeshContent"));
+                material.base_color_asset = metadata::property_asset_id(instance, "TextureID");
+                let mesh_id = metadata::property_asset_id(instance, "MeshId")
+                    .or_else(|| metadata::property_asset_id(instance, "MeshContent"));
                 match mesh_id {
                     Some(asset_id) => {
                         match load_mesh(&asset_id, download_dir, mesh_dir, mesh_cache) {
@@ -223,7 +224,7 @@ fn parse_model(
                     }
                 }
             }
-            "UnionOperation" => match property_asset_id(instance, "AssetId") {
+            "UnionOperation" => match metadata::property_asset_id(instance, "AssetId") {
                 Some(asset_id) => match load_mesh(&asset_id, download_dir, mesh_dir, mesh_cache) {
                     Ok(mut mesh) => {
                         apply_instance_size(&mut mesh, instance);
@@ -242,13 +243,15 @@ fn parse_model(
             _ => None,
         };
 
-        if let Some(surface_appearance_ref) = direct_child(dom, instance, "SurfaceAppearance") {
+        if let Some(surface_appearance_ref) =
+            metadata::direct_child(dom, instance, "SurfaceAppearance")
+        {
             let surface_appearance = dom
                 .get_by_ref(surface_appearance_ref)
                 .expect("valid child ref");
-            material.base_color_asset = property_asset_id(surface_appearance, "ColorMap")
+            material.base_color_asset = metadata::property_asset_id(surface_appearance, "ColorMap")
                 .or_else(|| material.base_color_asset.clone());
-            material.normal_asset = property_asset_id(surface_appearance, "NormalMap");
+            material.normal_asset = metadata::property_asset_id(surface_appearance, "NormalMap");
         }
 
         if let Some(mesh) = mesh {
@@ -257,7 +260,7 @@ fn parse_model(
                 mesh,
                 matrix,
                 material,
-                extras: roblox_instance_extras(dom, geometry_ref, reflection_database),
+                extras: metadata::roblox_instance_extras(dom, geometry_ref, reflection_database),
             });
         }
     }
@@ -268,6 +271,19 @@ fn parse_model(
         extras: model_extras,
         warnings,
     })
+}
+
+fn primitive_mesh(instance: &Instance, studs_per_tile: f32) -> UnionMesh {
+    let size = metadata::property_vector3(instance, "size")
+        .or_else(|| metadata::property_vector3(instance, "Size"))
+        .unwrap_or(Vector3::new(1.0, 1.0, 1.0));
+    let shape = instance
+        .properties
+        .get(&"shape".into())
+        .or_else(|| instance.properties.get(&"Shape".into()))
+        .and_then(metadata::enum_value)
+        .unwrap_or(1);
+    geometry::primitive_mesh(shape, size, studs_per_tile)
 }
 
 fn load_mesh(
@@ -285,8 +301,7 @@ fn load_mesh(
     let (source_path, packaged) = if payload_path.is_file() {
         (payload_path, false)
     } else {
-        let package_path = asset_dir.join("asset.rbxm");
-        (package_path, true)
+        (asset_dir.join("asset.rbxm"), true)
     };
     let result = fs::read(&source_path)
         .map_err(|error| format!("failed to read {}: {error}", source_path.display()))
@@ -318,7 +333,7 @@ fn decode_and_cache_mesh(
     let mesh = if packaged {
         load_packaged_mesh_bytes(bytes, source_path)?
     } else {
-        decode_mesh_payload(bytes)?
+        csg::decode_mesh_payload(bytes)?
     };
     let cached_bytes = csg::encode_cached_mesh(&mesh)?;
     if let Err(error) = fs::write(cache_path, cached_bytes) {
@@ -346,18 +361,18 @@ fn load_packaged_mesh_bytes(bytes: &[u8], path: &Path) -> Result<UnionMesh, Stri
                 })
         })
         .ok_or_else(|| format!("{} contains no PartOperationAsset MeshData", path.display()))?;
-    decode_mesh_payload(mesh_data)
+    csg::decode_mesh_payload(mesh_data)
         .map_err(|error| format!("failed to decode {}: {error}", path.display()))
 }
 
 fn apply_instance_size(mesh: &mut UnionMesh, instance: &Instance) {
-    let Some(size) =
-        property_vector3(instance, "size").or_else(|| property_vector3(instance, "Size"))
+    let Some(size) = metadata::property_vector3(instance, "size")
+        .or_else(|| metadata::property_vector3(instance, "Size"))
     else {
         return;
     };
-    let source_size =
-        property_vector3(instance, "InitialSize").unwrap_or_else(|| mesh_bounds_size(mesh));
+    let source_size = metadata::property_vector3(instance, "InitialSize")
+        .unwrap_or_else(|| mesh_bounds_size(mesh));
     scale_mesh_to_size(mesh, size, source_size);
 }
 
@@ -371,7 +386,7 @@ fn scale_mesh_to_size(mesh: &mut UnionMesh, target_size: Vector3, source_size: V
         for (coordinate, factor) in vertex.position.iter_mut().zip(scale) {
             *coordinate *= factor;
         }
-        vertex.normal = normalize([
+        vertex.normal = geometry_normalize([
             inverse_scale(vertex.normal[0], scale[0]),
             inverse_scale(vertex.normal[1], scale[1]),
             inverse_scale(vertex.normal[2], scale[2]),
@@ -415,742 +430,16 @@ fn mesh_bounds_size(mesh: &UnionMesh) -> Vector3 {
     )
 }
 
-fn material_for(dom: &WeakDom, instance: &Instance) -> ModelMaterial {
-    let material_value = instance.properties.get(&"Material".into());
-    let material_name = material_value
-        .and_then(enum_value)
-        .map(material_name)
-        .unwrap_or_else(|| "plastic".to_owned());
-    let color = instance
-        .properties
-        .get(&"Color".into())
-        .or_else(|| instance.properties.get(&"Color3uint8".into()))
-        .and_then(color_value)
-        .unwrap_or([255, 255, 255]);
-    let transparency = instance
-        .properties
-        .get(&"Transparency".into())
-        .and_then(float_value)
-        .unwrap_or(0.0)
-        .clamp(0.0, 1.0);
-
-    let mut material = ModelMaterial {
-        name: material_name,
-        color: [
-            color[0] as f32 / 255.0,
-            color[1] as f32 / 255.0,
-            color[2] as f32 / 255.0,
-            1.0 - transparency,
-        ],
-        base_color_asset: None,
-        normal_asset: None,
-    };
-
-    if let Some(surface_appearance_ref) = direct_child(dom, instance, "SurfaceAppearance") {
-        let surface_appearance = dom
-            .get_by_ref(surface_appearance_ref)
-            .expect("valid child ref");
-        material.base_color_asset = property_asset_id(surface_appearance, "ColorMap");
-        material.normal_asset = property_asset_id(surface_appearance, "NormalMap");
-    }
-    material
-}
-
-fn primitive_mesh(instance: &Instance, studs_per_tile: f32) -> UnionMesh {
-    let size = property_vector3(instance, "size")
-        .or_else(|| property_vector3(instance, "Size"))
-        .unwrap_or(Vector3::new(1.0, 1.0, 1.0));
-    let shape = instance
-        .properties
-        .get(&"shape".into())
-        .or_else(|| instance.properties.get(&"Shape".into()))
-        .and_then(enum_value)
-        .unwrap_or(1);
-
-    match shape {
-        0 => sphere_mesh(size, studs_per_tile),
-        2 => cylinder_mesh(size, studs_per_tile),
-        3 => wedge_mesh(size, studs_per_tile),
-        4 => corner_wedge_mesh(size, studs_per_tile),
-        _ => box_mesh(size, studs_per_tile),
-    }
-}
-
-fn box_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
-    let x = size.x.abs() * 0.5;
-    let y = size.y.abs() * 0.5;
-    let z = size.z.abs() * 0.5;
-    let mut mesh = UnionMesh {
-        vertices: Vec::with_capacity(24),
-        indices: Vec::with_capacity(36),
-    };
-    add_face_tiled(
-        &mut mesh,
-        [[x, -y, -z], [x, y, -z], [x, y, z], [x, -y, z]],
-        studs_per_tile,
-    );
-    add_face_tiled(
-        &mut mesh,
-        [[-x, -y, z], [-x, y, z], [-x, y, -z], [-x, -y, -z]],
-        studs_per_tile,
-    );
-    add_face_tiled(
-        &mut mesh,
-        [[-x, y, -z], [-x, y, z], [x, y, z], [x, y, -z]],
-        studs_per_tile,
-    );
-    add_face_tiled(
-        &mut mesh,
-        [[-x, -y, z], [-x, -y, -z], [x, -y, -z], [x, -y, z]],
-        studs_per_tile,
-    );
-    add_face_tiled(
-        &mut mesh,
-        [[-x, -y, z], [x, -y, z], [x, y, z], [-x, y, z]],
-        studs_per_tile,
-    );
-    add_face_tiled(
-        &mut mesh,
-        [[x, -y, -z], [-x, -y, -z], [-x, y, -z], [x, y, -z]],
-        studs_per_tile,
-    );
-    mesh
-}
-
-fn cylinder_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
-    let segments = 24usize;
-    let radius = size.y.abs().min(size.z.abs()) * 0.5;
-    let half_height = size.x.abs() * 0.5;
-    let tile = studs_per_tile.max(f32::EPSILON);
-    let circumference = std::f32::consts::TAU * radius;
-    let height = size.x.abs();
-
-    let mut mesh = UnionMesh {
-        vertices: Vec::with_capacity(segments * 12),
-        indices: Vec::with_capacity(segments * 12 * 3),
-    };
-
-    for segment in 0..segments {
-        let next = (segment + 1) % segments;
-        let angle = segment as f32 / segments as f32 * std::f32::consts::TAU;
-        let next_angle = if next == 0 {
-            std::f32::consts::TAU
-        } else {
-            next as f32 / segments as f32 * std::f32::consts::TAU
-        };
-
-        let current = [angle.cos(), angle.sin()];
-        let following = [next_angle.cos(), next_angle.sin()];
-
-        // +90 degrees around Z:
-        // (x, y, z) -> (-y, x, z)
-        add_face_with_uvs(
-            &mut mesh,
-            [
-                [half_height, radius * current[0], radius * current[1]],
-                [half_height, radius * following[0], radius * following[1]],
-                [-half_height, radius * following[0], radius * following[1]],
-                [-half_height, radius * current[0], radius * current[1]],
-            ],
-            [
-                [angle / std::f32::consts::TAU * circumference / tile, 0.0],
-                [
-                    next_angle / std::f32::consts::TAU * circumference / tile,
-                    0.0,
-                ],
-                [
-                    next_angle / std::f32::consts::TAU * circumference / tile,
-                    height / tile,
-                ],
-                [
-                    angle / std::f32::consts::TAU * circumference / tile,
-                    height / tile,
-                ],
-            ],
-            [0.0, current[0], current[1]],
-        );
-
-        // Original top cap (y = +half_height)
-        // rotated to x = -half_height.
-        let cap_positions = [
-            [-half_height, 0.0, 0.0],
-            [-half_height, radius * following[0], radius * following[1]],
-            [-half_height, radius * current[0], radius * current[1]],
-        ];
-        let cap_uvs = cap_positions
-            .map(|position| [(position[1] + radius) / tile, (position[2] + radius) / tile]);
-        add_triangle_with_uvs(&mut mesh, cap_positions, cap_uvs, [-1.0, 0.0, 0.0]);
-        let base = mesh.vertices.len() as u32 - 3;
-        mesh.indices.extend([base, base + 1, base + 2]);
-
-        // Original bottom cap (y = -half_height)
-        // rotated to x = +half_height.
-        let cap_positions = [
-            [half_height, 0.0, 0.0],
-            [half_height, radius * current[0], radius * current[1]],
-            [half_height, radius * following[0], radius * following[1]],
-        ];
-        let cap_uvs = cap_positions
-            .map(|position| [(position[1] + radius) / tile, (position[2] + radius) / tile]);
-        add_triangle_with_uvs(&mut mesh, cap_positions, cap_uvs, [1.0, 0.0, 0.0]);
-        let base = mesh.vertices.len() as u32 - 3;
-        mesh.indices.extend([base, base + 1, base + 2]);
-    }
-
-    mesh
-}
-
-fn sphere_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
-    let rings = 10usize;
-    let segments = 24usize;
-    let radii = [size.x.abs() * 0.5, size.y.abs() * 0.5, size.z.abs() * 0.5];
-    let tile = studs_per_tile.max(f32::EPSILON);
-    let equatorial_radius = (radii[0] + radii[2]) * 0.5;
-    let meridian_radius = (radii[0] + radii[1] + radii[2]) / 3.0;
-    let mut mesh = UnionMesh {
-        vertices: Vec::with_capacity(rings * segments * 4),
-        indices: Vec::with_capacity(rings * segments * 6),
-    };
-    for ring in 0..rings {
-        let lower =
-            -std::f32::consts::FRAC_PI_2 + ring as f32 / rings as f32 * std::f32::consts::PI;
-        let upper =
-            -std::f32::consts::FRAC_PI_2 + (ring + 1) as f32 / rings as f32 * std::f32::consts::PI;
-        for segment in 0..segments {
-            let next = (segment + 1) % segments;
-            let angle = segment as f32 / segments as f32 * std::f32::consts::TAU;
-            let next_angle = if next == 0 {
-                std::f32::consts::TAU
-            } else {
-                next as f32 / segments as f32 * std::f32::consts::TAU
-            };
-            let points = [
-                sphere_point(lower, angle, radii),
-                sphere_point(lower, next_angle, radii),
-                sphere_point(upper, next_angle, radii),
-                sphere_point(upper, angle, radii),
-            ];
-            let normals = points.map(|point| {
-                let normal = [
-                    if radii[0] == 0.0 {
-                        0.0
-                    } else {
-                        point[0] / radii[0]
-                    },
-                    if radii[1] == 0.0 {
-                        0.0
-                    } else {
-                        point[1] / radii[1]
-                    },
-                    if radii[2] == 0.0 {
-                        0.0
-                    } else {
-                        point[2] / radii[2]
-                    },
-                ];
-                normalize(normal)
-            });
-            let base = mesh.vertices.len() as u32;
-            for ((point, normal), (latitude, longitude)) in points.into_iter().zip(normals).zip([
-                (lower, angle),
-                (lower, next_angle),
-                (upper, next_angle),
-                (upper, angle),
-            ]) {
-                mesh.vertices.push(UnionVertex {
-                    position: point,
-                    normal,
-                    tex_coord: [
-                        longitude / std::f32::consts::TAU
-                            * (std::f32::consts::TAU * equatorial_radius)
-                            / tile,
-                        (latitude + std::f32::consts::FRAC_PI_2) * meridian_radius / tile,
-                    ],
-                    color: [255; 4],
-                });
-            }
-            mesh.indices
-                .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
-        }
-    }
-    mesh
-}
-
-fn wedge_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
-    let x = size.x.abs() * 0.5;
-    let y = size.y.abs() * 0.5;
-    let z = size.z.abs() * 0.5;
-
-    let p = |v: [f32; 3]| [-v[0], v[1], -v[2]];
-    let mut mesh = UnionMesh {
-        vertices: Vec::with_capacity(18),
-        indices: Vec::with_capacity(24),
-    };
-
-    add_face_tiled(
-        &mut mesh,
-        [
-            p([-x, -y, -z]),
-            p([x, -y, -z]),
-            p([x, -y, z]),
-            p([-x, -y, z]),
-        ],
-        studs_per_tile,
-    );
-
-    add_face_tiled(
-        &mut mesh,
-        [
-            p([-x, -y, -z]),
-            p([-x, y, -z]),
-            p([x, y, -z]),
-            p([x, -y, -z]),
-        ],
-        studs_per_tile,
-    );
-
-    add_triangle_tiled(
-        &mut mesh,
-        [p([-x, -y, z]), p([-x, y, -z]), p([-x, -y, -z])],
-        studs_per_tile,
-    );
-
-    add_triangle_tiled(
-        &mut mesh,
-        [p([x, -y, -z]), p([x, y, -z]), p([x, -y, z])],
-        studs_per_tile,
-    );
-
-    add_face_tiled(
-        &mut mesh,
-        [p([-x, -y, z]), p([x, -y, z]), p([x, y, -z]), p([-x, y, -z])],
-        studs_per_tile,
-    );
-
-    mesh
-}
-
-fn corner_wedge_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
-    let x = size.x.abs() * 0.5;
-    let y = size.y.abs() * 0.5;
-    let z = size.z.abs() * 0.5;
-    let apex = [x, y, -z];
-    let bottom = [[-x, -y, -z], [x, -y, -z], [x, -y, z], [-x, -y, z]];
-    let mut mesh = UnionMesh {
-        vertices: Vec::with_capacity(16),
-        indices: Vec::with_capacity(30),
-    };
-
-    add_face_tiled(
-        &mut mesh,
-        [bottom[3], bottom[0], bottom[1], bottom[2]],
-        studs_per_tile,
-    );
-    add_triangle_tiled(&mut mesh, [bottom[0], apex, bottom[1]], studs_per_tile);
-    add_triangle_tiled(&mut mesh, [bottom[1], apex, bottom[2]], studs_per_tile);
-    add_triangle_tiled(&mut mesh, [apex, bottom[3], bottom[2]], studs_per_tile);
-    add_triangle_tiled(&mut mesh, [bottom[3], apex, bottom[0]], studs_per_tile);
-
-    mesh
-}
-
-fn add_face_tiled(mesh: &mut UnionMesh, positions: [[f32; 3]; 4], studs_per_tile: f32) {
-    let tex_coords = quad_tex_coords(positions, studs_per_tile);
-    let normal = face_normal(positions);
-    add_face_with_uvs(mesh, positions, tex_coords, normal);
-}
-
-fn add_face_with_uvs(
-    mesh: &mut UnionMesh,
-    positions: [[f32; 3]; 4],
-    tex_coords: [[f32; 2]; 4],
-    normal: [f32; 3],
-) {
-    let base = mesh.vertices.len() as u32;
-    for (position, tex_coord) in positions.into_iter().zip(tex_coords) {
-        mesh.vertices.push(UnionVertex {
-            position,
-            normal,
-            tex_coord,
-            color: [255; 4],
-        });
-    }
-    mesh.indices
-        .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
-}
-
-fn add_triangle_tiled(mesh: &mut UnionMesh, positions: [[f32; 3]; 3], studs_per_tile: f32) {
-    let tex_coords = triangle_tex_coords(positions, studs_per_tile);
-    let normal = face_normal([positions[0], positions[1], positions[2], positions[2]]);
-    add_triangle_with_uvs(mesh, positions, tex_coords, normal);
-}
-
-fn add_triangle_with_uvs(
-    mesh: &mut UnionMesh,
-    positions: [[f32; 3]; 3],
-    tex_coords: [[f32; 2]; 3],
-    normal: [f32; 3],
-) {
-    let base = mesh.vertices.len() as u32;
-    for (position, tex_coord) in positions.into_iter().zip(tex_coords) {
-        mesh.vertices.push(UnionVertex {
-            position,
-            normal,
-            tex_coord,
-            color: [255; 4],
-        });
-    }
-    mesh.indices.extend([base, base + 1, base + 2]);
-}
-
-fn quad_tex_coords(positions: [[f32; 3]; 4], studs_per_tile: f32) -> [[f32; 2]; 4] {
-    let tile = studs_per_tile.max(f32::EPSILON);
-    let tangent = normalize(subtract(positions[1], positions[0]));
-    let bitangent = normalize(subtract(positions[3], positions[0]));
-    positions.map(|position| {
-        let offset = subtract(position, positions[0]);
-        [dot(offset, tangent) / tile, dot(offset, bitangent) / tile]
-    })
-}
-
-fn triangle_tex_coords(positions: [[f32; 3]; 3], studs_per_tile: f32) -> [[f32; 2]; 3] {
-    let tile = studs_per_tile.max(f32::EPSILON);
-    let tangent_edge = subtract(positions[1], positions[0]);
-    let tangent_length = length(tangent_edge);
-    let tangent = normalize(tangent_edge);
-    let second_edge = subtract(positions[2], positions[0]);
-    let tangent_offset = dot(second_edge, tangent);
-    let bitangent = normalize(subtract(second_edge, multiply(tangent, tangent_offset)));
-    let bitangent_offset = dot(second_edge, bitangent);
-    [
-        [0.0, 0.0],
-        [tangent_length / tile, 0.0],
-        [tangent_offset / tile, bitangent_offset / tile],
-    ]
-}
-
-fn face_normal(positions: [[f32; 3]; 4]) -> [f32; 3] {
-    normalize(cross(
-        subtract(positions[1], positions[0]),
-        subtract(positions[2], positions[0]),
-    ))
-}
-
-fn subtract(first: [f32; 3], second: [f32; 3]) -> [f32; 3] {
-    [
-        first[0] - second[0],
-        first[1] - second[1],
-        first[2] - second[2],
-    ]
-}
-
-fn multiply(value: [f32; 3], factor: f32) -> [f32; 3] {
-    [value[0] * factor, value[1] * factor, value[2] * factor]
-}
-
-fn dot(first: [f32; 3], second: [f32; 3]) -> f32 {
-    first[0] * second[0] + first[1] * second[1] + first[2] * second[2]
-}
-
-fn cross(first: [f32; 3], second: [f32; 3]) -> [f32; 3] {
-    [
-        first[1] * second[2] - first[2] * second[1],
-        first[2] * second[0] - first[0] * second[2],
-        first[0] * second[1] - first[1] * second[0],
-    ]
-}
-
-fn length(value: [f32; 3]) -> f32 {
-    dot(value, value).sqrt()
-}
-
-fn sphere_point(latitude: f32, longitude: f32, radii: [f32; 3]) -> [f32; 3] {
-    let latitude_cos = latitude.cos();
-    [
-        radii[0] * latitude_cos * longitude.cos(),
-        radii[1] * latitude.sin(),
-        radii[2] * latitude_cos * longitude.sin(),
-    ]
-}
-
-fn normalize(value: [f32; 3]) -> [f32; 3] {
-    let length = (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt();
-    if length <= f32::EPSILON {
-        [0.0, 1.0, 0.0]
-    } else {
-        [value[0] / length, value[1] / length, value[2] / length]
-    }
-}
-
 fn apply_special_mesh_transform(mesh: &mut UnionMesh, instance: &Instance) {
-    let scale = property_vector3(instance, "Scale").unwrap_or(Vector3::new(1.0, 1.0, 1.0));
-    let offset = property_vector3(instance, "Offset").unwrap_or(Vector3::new(0.0, 0.0, 0.0));
+    let scale =
+        metadata::property_vector3(instance, "Scale").unwrap_or(Vector3::new(1.0, 1.0, 1.0));
+    let offset =
+        metadata::property_vector3(instance, "Offset").unwrap_or(Vector3::new(0.0, 0.0, 0.0));
     for vertex in &mut mesh.vertices {
         vertex.position[0] = vertex.position[0] * scale.x + offset.x;
         vertex.position[1] = vertex.position[1] * scale.y + offset.y;
         vertex.position[2] = vertex.position[2] * scale.z + offset.z;
     }
-}
-
-fn direct_child(dom: &WeakDom, instance: &Instance, class: &str) -> Option<Ref> {
-    instance.children().iter().copied().find(|child_ref| {
-        dom.get_by_ref(*child_ref)
-            .is_some_and(|child| is_class(child, class))
-    })
-}
-
-fn is_geometry(instance: &Instance) -> bool {
-    matches!(
-        instance.class.as_str(),
-        "Part" | "MeshPart" | "UnionOperation"
-    )
-}
-
-fn is_class(instance: &Instance, class: &str) -> bool {
-    instance.class.as_str() == class
-}
-
-fn reflection_database() -> &'static ReflectionDatabase<'static> {
-    rbx_reflection_database::get().unwrap_or_else(|_| rbx_reflection_database::get_bundled())
-}
-
-fn roblox_instance_extras(
-    dom: &WeakDom,
-    instance_ref: Ref,
-    database: &ReflectionDatabase<'static>,
-) -> Value {
-    let Some(instance) = dom.get_by_ref(instance_ref) else {
-        return Value::Null;
-    };
-
-    let (properties, serialized_properties, property_types) =
-        discovered_properties(instance, database);
-    let children = instance
-        .children()
-        .iter()
-        .map(|child_ref| roblox_instance_extras(dom, *child_ref, database))
-        .collect::<Vec<_>>();
-
-    let mut extras = Map::new();
-    extras.insert("className".to_owned(), json!(instance.class.as_str()));
-    extras.insert("name".to_owned(), json!(instance.name));
-    extras.insert(
-        "referent".to_owned(),
-        json!(instance.referent().to_string()),
-    );
-    extras.insert("properties".to_owned(), Value::Object(properties));
-    if !serialized_properties.is_empty() {
-        extras.insert(
-            "serializedProperties".to_owned(),
-            Value::Object(serialized_properties),
-        );
-    }
-    if !property_types.is_empty() {
-        extras.insert("propertyTypes".to_owned(), Value::Object(property_types));
-    }
-    if !children.is_empty() {
-        extras.insert("children".to_owned(), Value::Array(children));
-    }
-    Value::Object(extras)
-}
-
-fn discovered_properties(
-    instance: &Instance,
-    database: &ReflectionDatabase<'static>,
-) -> (Map<String, Value>, Map<String, Value>, Map<String, Value>) {
-    let class_descriptor = database.classes.get(instance.class.as_str());
-    let mut property_names = BTreeSet::new();
-    let mut reflected_property_types = Map::new();
-
-    if let Some(class_descriptor) = class_descriptor {
-        for descriptor in database.superclasses_iter(class_descriptor) {
-            for (name, property) in &descriptor.properties {
-                let name = (*name).to_owned();
-                property_names.insert(name.clone());
-                reflected_property_types
-                    .insert(name, json!(reflection_data_type_name(&property.data_type)));
-            }
-        }
-    }
-
-    for name in instance.properties.keys() {
-        let name = name.to_string();
-        property_names.insert(name.clone());
-    }
-
-    let mut properties = Map::new();
-    let mut serialized_properties = Map::new();
-    let mut property_types = Map::new();
-    for name in property_names {
-        let Some(value) = instance.properties.get(&name.clone().into()) else {
-            continue;
-        };
-        let is_default = class_descriptor
-            .and_then(|class_descriptor| database.find_default_property(class_descriptor, &name))
-            .is_some_and(|default| value == default);
-        if is_default {
-            continue;
-        }
-
-        let value_json = variant_to_json(value);
-        properties.insert(name.clone(), value_json.clone());
-        serialized_properties.insert(name.clone(), value_json);
-        property_types.insert(
-            name.clone(),
-            reflected_property_types
-                .get(&name)
-                .cloned()
-                .unwrap_or_else(|| json!(variant_type_name(value))),
-        );
-    }
-
-    (properties, serialized_properties, property_types)
-}
-
-fn reflection_data_type_name(data_type: &DataType<'_>) -> String {
-    match data_type {
-        DataType::Value(variant_type) => format!("{variant_type:?}"),
-        DataType::Enum(enum_name) => format!("Enum<{enum_name}>"),
-        _ => "Unknown".to_owned(),
-    }
-}
-
-fn variant_type_name(value: &Variant) -> String {
-    format!("{:?}", value.ty())
-}
-
-fn variant_to_json(value: &Variant) -> Value {
-    serde_json::to_value(value).unwrap_or_else(|error| {
-        json!({
-            "type": variant_type_name(value),
-            "debug": format!("{value:?}"),
-            "serializationError": error.to_string()
-        })
-    })
-}
-
-fn property_asset_id(instance: &Instance, property: &str) -> Option<String> {
-    let value = instance.properties.get(&property.into())?;
-    let uri = match value {
-        Variant::Content(content) => content.as_uri(),
-        Variant::ContentId(content_id) => Some(content_id.as_str()),
-        _ => None,
-    }?;
-    parse_asset_id(uri)
-}
-
-fn parse_asset_id(uri: &str) -> Option<String> {
-    let query_id = uri
-        .split_once("id=")
-        .map(|(_, value)| value)
-        .and_then(|value| value.split(['&', '#', '/']).next());
-    let scheme_id = uri
-        .strip_prefix("rbxassetid://")
-        .or_else(|| uri.strip_prefix("rbxasset://"))
-        .and_then(|value| value.split(['?', '#', '/']).next());
-    query_id
-        .or(scheme_id)
-        .filter(|value| {
-            !value.is_empty() && value.chars().all(|character| character.is_ascii_digit())
-        })
-        .map(str::to_owned)
-}
-
-fn property_cframe(instance: &Instance, property: &str) -> Option<CFrame> {
-    match instance.properties.get(&property.into())? {
-        Variant::CFrame(cframe) => Some(*cframe),
-        Variant::OptionalCFrame(cframe) => *cframe,
-        _ => None,
-    }
-}
-
-fn property_vector3(instance: &Instance, property: &str) -> Option<Vector3> {
-    match instance.properties.get(&property.into())? {
-        Variant::Vector3(vector) => Some(*vector),
-        _ => None,
-    }
-}
-
-fn color_value(value: &Variant) -> Option<[u8; 3]> {
-    match value {
-        Variant::Color3uint8(color) => Some([color.r, color.g, color.b]),
-        Variant::Color3(color) => Some([
-            (color.r.clamp(0.0, 1.0) * 255.0).round() as u8,
-            (color.g.clamp(0.0, 1.0) * 255.0).round() as u8,
-            (color.b.clamp(0.0, 1.0) * 255.0).round() as u8,
-        ]),
-        _ => None,
-    }
-}
-
-fn float_value(value: &Variant) -> Option<f32> {
-    match value {
-        Variant::Float32(value) => Some(*value),
-        Variant::Float64(value) => Some(*value as f32),
-        _ => None,
-    }
-}
-
-fn enum_value(value: &Variant) -> Option<u32> {
-    match value {
-        Variant::Enum(value) => Some(value.to_u32()),
-        Variant::EnumItem(value) => Some(value.value),
-        Variant::Int32(value) => (*value >= 0).then_some(*value as u32),
-        Variant::Int64(value) => (*value >= 0).then_some(*value as u32),
-        _ => None,
-    }
-}
-
-fn material_name(value: u32) -> String {
-    let name = match value {
-        256 => "plastic",
-        272 => "smoothplastic",
-        288 => "neon",
-        512 => "wood",
-        528 => "woodplanks",
-        784 => "marble",
-        788 => "basalt",
-        800 => "slate",
-        804 => "crackedlava",
-        816 => "concrete",
-        820 => "limestone",
-        832 => "granite",
-        836 => "pavement",
-        848 => "brick",
-        864 => "pebble",
-        880 => "cobblestone",
-        896 => "rock",
-        912 => "sandstone",
-        1040 => "corrodedmetal",
-        1056 => "diamondplate",
-        1072 => "foil",
-        1088 => "metal",
-        1280 => "grass",
-        1284 => "leafygrass",
-        1296 => "sand",
-        1312 => "fabric",
-        1328 => "snow",
-        1344 => "mud",
-        1360 => "ground",
-        1376 => "asphalt",
-        1392 => "salt",
-        1536 => "ice",
-        1552 => "glacier",
-        1568 => "glass",
-        1584 => "forcefield",
-        1792 => "air",
-        2048 => "water",
-        2304 => "cardboard",
-        2305 => "carpet",
-        2306 => "ceramictiles",
-        2307 => "clayrooftiles",
-        2308 => "roofshingles",
-        2309 => "leather",
-        2310 => "plaster",
-        2311 => "rubber",
-        _ => "plastic",
-    };
-    name.to_owned()
 }
 
 fn relative_matrix(root: CFrame, child: CFrame) -> [f32; 16] {
@@ -1222,20 +511,20 @@ fn matrix_rows(cframe: CFrame) -> [[f32; 3]; 3] {
     ]
 }
 
+fn geometry_normalize(value: [f32; 3]) -> [f32; 3] {
+    let length = (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt();
+    if length <= f32::EPSILON {
+        [0.0, 1.0, 0.0]
+    } else {
+        [value[0] / length, value[1] / length, value[2] / length]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::csg::UnionVertex;
     use rbx_dom_weak::InstanceBuilder;
-
-    #[test]
-    fn parses_asset_ids_from_roblox_urls() {
-        assert_eq!(parse_asset_id("rbxassetid://123"), Some("123".to_owned()));
-        assert_eq!(
-            parse_asset_id("https://www.roblox.com/asset/?id=456"),
-            Some("456".to_owned())
-        );
-        assert_eq!(parse_asset_id("rbxassetid://not-an-id"), None);
-    }
 
     #[test]
     fn converts_a_world_cframe_to_model_local_space() {
@@ -1249,133 +538,6 @@ mod tests {
         );
         let matrix = relative_matrix(root, child);
         assert_eq!(&matrix[12..15], &[1.0, 2.0, 3.0]);
-    }
-
-    #[test]
-    fn corner_wedge_rises_toward_positive_x_negative_z() {
-        let mesh = corner_wedge_mesh(Vector3::new(2.0, 4.0, 6.0), 2.0);
-
-        assert!(
-            mesh.vertices
-                .iter()
-                .filter(|vertex| vertex.position[1] == 2.0)
-                .all(|vertex| vertex.position == [1.0, 2.0, -3.0])
-        );
-    }
-
-    #[test]
-    fn scales_box_uvs_by_planar_dimensions() {
-        let mesh = box_mesh(Vector3::new(2.0, 4.0, 6.0), 2.0);
-
-        assert_eq!(
-            &mesh.vertices[0..4]
-                .iter()
-                .map(|vertex| vertex.tex_coord)
-                .collect::<Vec<_>>(),
-            &[[0.0, 0.0], [2.0, 0.0], [2.0, 3.0], [0.0, 3.0]]
-        );
-        assert_eq!(
-            &mesh.vertices[8..12]
-                .iter()
-                .map(|vertex| vertex.tex_coord)
-                .collect::<Vec<_>>(),
-            &[[0.0, 0.0], [3.0, 0.0], [3.0, 1.0], [0.0, 1.0]]
-        );
-        assert_eq!(
-            &mesh.vertices[16..20]
-                .iter()
-                .map(|vertex| vertex.tex_coord)
-                .collect::<Vec<_>>(),
-            &[[0.0, 0.0], [1.0, 0.0], [1.0, 2.0], [0.0, 2.0]]
-        );
-    }
-
-    #[test]
-    fn cylinder_side_uvs_follow_the_full_circumference() {
-        let mesh = cylinder_mesh(Vector3::new(10.0, 4.0, 4.0), 2.0);
-        let segment_step = std::f32::consts::TAU * 2.0 / 24.0 / 2.0;
-        let side_vertices_per_segment = 10;
-
-        assert_close(mesh.vertices[0].tex_coord[0], 0.0);
-        assert_close(mesh.vertices[1].tex_coord[0], segment_step);
-        assert_close(
-            mesh.vertices[side_vertices_per_segment].tex_coord[0],
-            segment_step,
-        );
-        assert_close(
-            mesh.vertices[23 * side_vertices_per_segment + 1].tex_coord[0],
-            std::f32::consts::TAU,
-        );
-        assert_close(mesh.vertices[2].tex_coord[1], 5.0);
-    }
-
-    #[test]
-    fn sphere_uvs_follow_surface_arc_lengths() {
-        let mesh = sphere_mesh(Vector3::new(4.0, 4.0, 4.0), 2.0);
-        let longitude_step = std::f32::consts::TAU / 24.0;
-
-        assert_close(mesh.vertices[0].tex_coord[0], 0.0);
-        assert_close(mesh.vertices[1].tex_coord[0], longitude_step);
-        assert_close(mesh.vertices[0].tex_coord[1], 0.0);
-        assert_close(mesh.vertices[2].tex_coord[1], std::f32::consts::PI / 10.0);
-        assert_close(
-            mesh.vertices[23 * 4 + 1].tex_coord[0],
-            std::f32::consts::TAU,
-        );
-    }
-
-    #[test]
-    fn wedge_slope_uvs_follow_the_diagonal_surface() {
-        let mesh = wedge_mesh(Vector3::new(2.0, 4.0, 6.0), 2.0);
-        let slope = &mesh.vertices[14..18];
-
-        assert_eq!(slope[0].tex_coord, [0.0, 0.0]);
-        assert_close(slope[1].tex_coord[0], 1.0);
-        assert_close(slope[3].tex_coord[1], 4.0f32.hypot(6.0) / 2.0);
-    }
-
-    fn assert_close(actual: f32, expected: f32) {
-        assert!(
-            (actual - expected).abs() < 1.0e-5,
-            "expected {expected}, got {actual}"
-        );
-    }
-
-    #[test]
-    fn wedge_normals_match_dimensions_and_triangle_winding() {
-        let mesh = wedge_mesh(Vector3::new(2.0, 4.0, 6.0), 2.0);
-
-        assert_eq!(mesh.vertices.len(), 18);
-        assert_eq!(mesh.indices.len(), 24);
-        assert_eq!(mesh.vertices[14].normal, normalize([0.0, 3.0, -2.0]));
-        assert!(mesh.indices.chunks_exact(3).all(|triangle| {
-            let first = mesh.vertices[triangle[0] as usize].position;
-            let second = mesh.vertices[triangle[1] as usize].position;
-            let third = mesh.vertices[triangle[2] as usize].position;
-            let first_edge = [
-                second[0] - first[0],
-                second[1] - first[1],
-                second[2] - first[2],
-            ];
-            let second_edge = [
-                third[0] - first[0],
-                third[1] - first[1],
-                third[2] - first[2],
-            ];
-            let cross = [
-                first_edge[1] * second_edge[2] - first_edge[2] * second_edge[1],
-                first_edge[2] * second_edge[0] - first_edge[0] * second_edge[2],
-                first_edge[0] * second_edge[1] - first_edge[1] * second_edge[0],
-            ];
-            let normal = mesh.vertices[triangle[0] as usize].normal;
-            let area_squared = cross.iter().map(|value| value * value).sum::<f32>();
-            let winding_alignment = cross
-                .iter()
-                .zip(normal)
-                .map(|(cross_value, normal_value)| cross_value * normal_value)
-                .sum::<f32>();
-            area_squared > f32::EPSILON && winding_alignment > f32::EPSILON
-        }));
     }
 
     #[test]
@@ -1409,38 +571,12 @@ mod tests {
     }
 
     #[test]
-    fn discovers_serialized_unknown_and_inherited_properties() {
+    fn finds_geometry_under_a_model_root() {
         let dom = WeakDom::new(
-            InstanceBuilder::new("Part")
-                .with_name("MetadataPart")
-                .with_property("Anchored", true)
-                .with_property("CustomMetadata", "kept")
-                .with_child(InstanceBuilder::new("Folder").with_name("Child")),
+            InstanceBuilder::new("Model")
+                .with_child(InstanceBuilder::new("Part").with_name("Part")),
         );
-        let extras = roblox_instance_extras(&dom, dom.root_ref(), reflection_database());
 
-        assert_eq!(extras["className"], "Part");
-        assert_eq!(extras["properties"]["Anchored"]["Bool"], true);
-        assert_eq!(
-            extras["serializedProperties"]["CustomMetadata"]["String"],
-            "kept"
-        );
-        assert_eq!(extras["propertyTypes"]["Anchored"], "Bool");
-        assert_eq!(extras["children"][0]["name"], "Child");
-    }
-
-    #[test]
-    fn omits_properties_equal_to_reflection_defaults() {
-        let dom = WeakDom::new(
-            InstanceBuilder::new("Part")
-                .with_property("Anchored", false)
-                .with_property("CustomMetadata", "kept"),
-        );
-        let extras = roblox_instance_extras(&dom, dom.root_ref(), reflection_database());
-
-        assert!(extras["properties"].get("Anchored").is_none());
-        assert!(extras["serializedProperties"].get("Anchored").is_none());
-        assert!(extras["propertyTypes"].get("Anchored").is_none());
-        assert_eq!(extras["properties"]["CustomMetadata"]["String"], "kept");
+        assert_eq!(model_roots(&dom), vec![dom.root_ref()]);
     }
 }

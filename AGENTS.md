@@ -11,6 +11,16 @@ Please update this document after any relevant changes.
 - The model manifest/cache format is versioned; bump the manifest version and model fingerprint discriminator when changing exported GLTF structure so stale files without metadata are regenerated.
 - Generated primitive UVs use physical surface projections divided by `--studs-per-tile`; cylinder sides follow circumference, spheres follow surface arc lengths, and exported textures reference an explicit GLTF `REPEAT` sampler.
 
+## Module Boundaries
+
+- `main.rs` owns CLI parsing and stage-level progress output.
+- `pipeline.rs` owns model/GLB export orchestration, manifests, fingerprints, and cache reuse.
+- `model.rs` converts Roblox DOM instances into renderable model assets and handles downloaded mesh loading.
+- `geometry.rs` owns generated primitive topology, normals, and UV projection.
+- `metadata.rs` owns Roblox reflection, property conversion, material mapping, and `extras.roblox` generation.
+- `csg.rs` owns decoded mesh types, payload decoders, and the versioned decoded-mesh cache format.
+- `gltf.rs` owns GLTF/GLB serialization and texture staging.
+
 ## Gotchas
 
 1. Roblox uses a right-handed coordinate system.

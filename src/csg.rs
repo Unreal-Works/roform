@@ -209,6 +209,16 @@ pub(crate) fn payload_version(bytes: &[u8]) -> String {
     "unknown".to_owned()
 }
 
+pub(crate) fn decode_mesh_payload(bytes: &[u8]) -> Result<UnionMesh, String> {
+    let version = payload_version(bytes);
+    match version.as_str() {
+        "CSGK" | "CSGMDL2" | "CSGMDL4" | "CSGMDL5" => {
+            decode_union_graphics(bytes).map_err(|error| format!("{version}: {error}"))
+        }
+        _ => decode_mesh(bytes).map_err(|error| format!("{version}: {error}")),
+    }
+}
+
 pub(crate) fn decode_union_graphics(bytes: &[u8]) -> Result<UnionMesh, CsgError> {
     if bytes.is_empty() {
         return Err(CsgError::Empty);
