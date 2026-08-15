@@ -72,8 +72,9 @@ fn run(input: PathBuf, out_dir: PathBuf) -> Result<(), String> {
         eprintln!("failed mesh {}: {}", failure.asset_id, failure.error);
     }
     println!(
-        "mesh: decoded {}, failed {} -> {} in {:.2}s",
+        "mesh: decoded {}, reused {}, failed {} -> {} in {:.2}s",
         mesh_report.decoded,
+        mesh_report.cached,
         mesh_report.failed.len(),
         mesh_report.output_directory.display(),
         mesh_start_time.elapsed().as_secs_f64()
@@ -85,6 +86,7 @@ fn run(input: PathBuf, out_dir: PathBuf) -> Result<(), String> {
 #[derive(Debug)]
 struct MeshReport {
     decoded: usize,
+    cached: usize,
     failed: Vec<MeshFailure>,
     output_directory: PathBuf,
 }
@@ -105,6 +107,7 @@ fn decode_downloaded_meshes(download_dir: &Path, output_dir: &Path) -> Result<Me
 
     let mut report = MeshReport {
         decoded: 0,
+        cached: 0,
         failed: Vec::new(),
         output_directory: output_dir.to_owned(),
     };
@@ -143,6 +146,18 @@ fn decode_downloaded_meshes(download_dir: &Path, output_dir: &Path) -> Result<Me
                 continue;
             }
         };
+        let fingerprint = blake3::hash(&bytes).to_hex().to_string();
+        let output_path = output_dir.join(format!("{asset_id}.glb"));
+        let fingerprint_path = output_dir.join(format!("{asset_id}.blake3"));
+        if output_path.is_file()
+            && fs::read_to_string(&fingerprint_path)
+                .map(|cached_fingerprint| cached_fingerprint.trim() == fingerprint)
+                .unwrap_or(false)
+        {
+            report.cached += 1;
+            continue;
+        }
+
         let mesh = match decode_mesh_payload(&bytes) {
             Ok(mesh) => mesh,
             Err(error) => {
@@ -151,11 +166,17 @@ fn decode_downloaded_meshes(download_dir: &Path, output_dir: &Path) -> Result<Me
             }
         };
 
-        let output_path = output_dir.join(format!("{asset_id}.glb"));
         if let Err(error) = fs::write(&output_path, gltf::union_to_glb(&mesh)) {
             report.failed.push(MeshFailure {
                 asset_id,
                 error: format!("failed to write {}: {error}", output_path.display()),
+            });
+            continue;
+        }
+        if let Err(error) = fs::write(&fingerprint_path, fingerprint) {
+            report.failed.push(MeshFailure {
+                asset_id,
+                error: format!("failed to write {}: {error}", fingerprint_path.display()),
             });
             continue;
         }
