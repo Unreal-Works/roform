@@ -4,7 +4,7 @@
 	<External>nil</External>
 	<Item class="Part" referent="RBXE4DFE270F2F844C7A5B98589500A0637">
 		<Properties>
-			<token name="shape">1</token>
+			<token name="shape">0</token>
 			<token name="formFactorRaw">1</token>
 			<bool name="Anchored">true</bool>
 			<bool name="AudioCanCollide">true</bool>
