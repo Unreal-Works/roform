@@ -78,6 +78,19 @@ pub(crate) fn mesh_tangents(mesh: &UnionMesh) -> Vec<[f32; 4]> {
         .collect()
 }
 
+pub(crate) fn project_flat_mesh_uvs(mesh: &mut UnionMesh, matrix: [f32; 16], studs_per_tile: f32) {
+    let tile = studs_per_tile.max(f32::EPSILON);
+    for vertex in &mut mesh.vertices {
+        let position = transform_position(matrix, vertex.position);
+        let normal = normalize(transform_direction(matrix, vertex.normal));
+        let (tangent, bitangent) = face_basis(normal);
+        vertex.tex_coord = [
+            dot(position, tangent) / tile,
+            dot(position, bitangent) / tile,
+        ];
+    }
+}
+
 fn box_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
     let x = size.x.abs() * 0.5;
     let y = size.y.abs() * 0.5;
@@ -403,12 +416,7 @@ fn face_tex_coords<const N: usize>(
     studs_per_tile: f32,
 ) -> [[f32; 2]; N] {
     let tile = studs_per_tile.max(f32::EPSILON);
-    let reference = least_aligned_axis(normal);
-    let tangent = normalize(subtract(
-        reference,
-        multiply(normal, dot(reference, normal)),
-    ));
-    let bitangent = normalize(cross(normal, tangent));
+    let (tangent, bitangent) = face_basis(normal);
     let mut tex_coords = positions.map(|position| {
         [
             dot(position, tangent) / tile,
@@ -423,6 +431,16 @@ fn face_tex_coords<const N: usize>(
         tex_coord[1] -= minimum[1];
     }
     tex_coords
+}
+
+fn face_basis(normal: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    let reference = least_aligned_axis(normal);
+    let tangent = normalize(subtract(
+        reference,
+        multiply(normal, dot(reference, normal)),
+    ));
+    let bitangent = normalize(cross(normal, tangent));
+    (tangent, bitangent)
 }
 
 fn face_normal(positions: [[f32; 3]; 4]) -> [f32; 3] {
@@ -475,6 +493,22 @@ fn least_aligned_axis(normal: [f32; 3]) -> [f32; 3] {
     } else {
         [0.0, 0.0, 1.0]
     }
+}
+
+fn transform_position(matrix: [f32; 16], position: [f32; 3]) -> [f32; 3] {
+    [
+        matrix[0] * position[0] + matrix[4] * position[1] + matrix[8] * position[2] + matrix[12],
+        matrix[1] * position[0] + matrix[5] * position[1] + matrix[9] * position[2] + matrix[13],
+        matrix[2] * position[0] + matrix[6] * position[1] + matrix[10] * position[2] + matrix[14],
+    ]
+}
+
+fn transform_direction(matrix: [f32; 16], direction: [f32; 3]) -> [f32; 3] {
+    [
+        matrix[0] * direction[0] + matrix[4] * direction[1] + matrix[8] * direction[2],
+        matrix[1] * direction[0] + matrix[5] * direction[1] + matrix[9] * direction[2],
+        matrix[2] * direction[0] + matrix[6] * direction[1] + matrix[10] * direction[2],
+    ]
 }
 
 fn sphere_point(latitude: f32, longitude: f32, radii: [f32; 3]) -> [f32; 3] {
@@ -589,6 +623,38 @@ mod tests {
     }
 
     #[test]
+    fn model_space_projection_aligns_rotated_wedge_and_box_faces() {
+        let size = Vector3::new(2.0, 4.0, 6.0);
+        let identity = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let rotated = [
+            -1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 3.0, 0.0, 0.0, 1.0,
+        ];
+        let mut box_mesh = box_mesh(size, 2.0);
+        let mut wedge_mesh = wedge_mesh(size, 2.0);
+
+        project_flat_mesh_uvs(&mut box_mesh, identity, 2.0);
+        project_flat_mesh_uvs(&mut wedge_mesh, rotated, 2.0);
+
+        assert_model_space_uv_axes(&box_mesh.vertices[20..24], identity, 2.0);
+        assert_model_space_uv_axes(&wedge_mesh.vertices[14..18], rotated, 2.0);
+        for (mesh, matrix, range) in [
+            (&box_mesh, identity, 20..24),
+            (&wedge_mesh, rotated, 14..18),
+        ] {
+            let tangents = mesh_tangents(mesh);
+            for tangent in &tangents[range] {
+                assert_vector_close(
+                    transform_direction(matrix, [tangent[0], tangent[1], tangent[2]]),
+                    [1.0, 0.0, 0.0],
+                );
+                assert_close(tangent[3], 1.0);
+            }
+        }
+    }
+
+    #[test]
     fn wedge_normals_match_dimensions_and_triangle_winding() {
         let mesh = wedge_mesh(Vector3::new(2.0, 4.0, 6.0), 2.0);
 
@@ -667,6 +733,34 @@ mod tests {
                 (pair[1].position[bitangent_axis] - pair[0].position[bitangent_axis])
                     / studs_per_tile,
             );
+        }
+    }
+
+    fn assert_model_space_uv_axes(
+        vertices: &[UnionVertex],
+        matrix: [f32; 16],
+        studs_per_tile: f32,
+    ) {
+        let normal = normalize(transform_direction(matrix, vertices[0].normal));
+        let (tangent, bitangent) = face_basis(normal);
+        for pair in vertices.windows(2) {
+            let first = transform_position(matrix, pair[0].position);
+            let second = transform_position(matrix, pair[1].position);
+            let offset = subtract(second, first);
+            assert_close(
+                pair[1].tex_coord[0] - pair[0].tex_coord[0],
+                dot(offset, tangent) / studs_per_tile,
+            );
+            assert_close(
+                pair[1].tex_coord[1] - pair[0].tex_coord[1],
+                dot(offset, bitangent) / studs_per_tile,
+            );
+        }
+    }
+
+    fn assert_vector_close(actual: [f32; 3], expected: [f32; 3]) {
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert_close(actual, expected);
         }
     }
 }

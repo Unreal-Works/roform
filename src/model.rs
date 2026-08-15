@@ -202,13 +202,15 @@ fn parse_model(
                             }
                         }
                     } else {
-                        Some(primitive_mesh(instance, studs_per_tile))
+                        Some(primitive_mesh(instance, matrix, studs_per_tile))
                     }
                 } else {
-                    Some(primitive_mesh(instance, studs_per_tile))
+                    Some(primitive_mesh(instance, matrix, studs_per_tile))
                 }
             }
-            "WedgePart" | "CornerWedgePart" => Some(primitive_mesh(instance, studs_per_tile)),
+            "WedgePart" | "CornerWedgePart" => {
+                Some(primitive_mesh(instance, matrix, studs_per_tile))
+            }
             "MeshPart" => {
                 material.base_color_asset = metadata::property_asset_id(instance, "TextureID");
                 let mesh_id = metadata::property_asset_id(instance, "MeshId")
@@ -294,7 +296,7 @@ fn parse_model(
     })
 }
 
-fn primitive_mesh(instance: &Instance, studs_per_tile: f32) -> UnionMesh {
+fn primitive_mesh(instance: &Instance, matrix: [f32; 16], studs_per_tile: f32) -> UnionMesh {
     let size = metadata::property_vector3(instance, "size")
         .or_else(|| metadata::property_vector3(instance, "Size"))
         .unwrap_or(Vector3::new(1.0, 1.0, 1.0));
@@ -308,7 +310,11 @@ fn primitive_mesh(instance: &Instance, studs_per_tile: f32) -> UnionMesh {
             .and_then(metadata::enum_value)
             .unwrap_or(1),
     };
-    geometry::primitive_mesh(shape, size, studs_per_tile)
+    let mut mesh = geometry::primitive_mesh(shape, size, studs_per_tile);
+    if !matches!(shape, 0 | 2) {
+        geometry::project_flat_mesh_uvs(&mut mesh, matrix, studs_per_tile);
+    }
+    mesh
 }
 
 fn load_mesh(
@@ -611,7 +617,13 @@ mod tests {
             InstanceBuilder::new("WedgePart").with_property("Size", Vector3::new(2.0, 4.0, 6.0)),
         );
 
-        let mesh = primitive_mesh(dom.root(), 2.0);
+        let mesh = primitive_mesh(
+            dom.root(),
+            [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+            2.0,
+        );
 
         assert_eq!(mesh.vertices.len(), 18);
         assert_eq!(mesh.indices.len(), 24);
