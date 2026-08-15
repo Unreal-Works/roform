@@ -16,6 +16,7 @@ pub(crate) fn model_to_gltf(
     gltf_output_dir: &Path,
     asset_output_dir: &Path,
     buffer_output_path: &Path,
+    include_materials: bool,
 ) -> Result<Vec<u8>, String> {
     if model.primitives.is_empty() {
         return Err("model contains no renderable geometry".to_owned());
@@ -27,7 +28,7 @@ pub(crate) fn model_to_gltf(
     let mut accessors = Vec::new();
     let mut meshes = Vec::new();
     let mut nodes = Vec::new();
-    let mut materials = Vec::new();
+    let mut gltf_materials = Vec::new();
     let mut images = Vec::new();
     let mut textures = Vec::new();
     let samplers = vec![json!({ "wrapS": 10497, "wrapT": 10497 })];
@@ -39,7 +40,7 @@ pub(crate) fn model_to_gltf(
         gltf_output_dir,
         asset_output_dir,
         material_indices: &mut material_indices,
-        materials: &mut materials,
+        materials: &mut gltf_materials,
         image_indices: &mut image_indices,
         images: &mut images,
         textures: &mut textures,
@@ -127,22 +128,27 @@ pub(crate) fn model_to_gltf(
             "type": "SCALAR"
         }));
 
-        let material_index = material_export.material_index(&primitive.material)?;
+        let material_index = include_materials
+            .then(|| material_export.material_index(&primitive.material))
+            .transpose()?;
+        let mut primitive_json = json!({
+            "attributes": {
+                "POSITION": position_accessor,
+                "NORMAL": normal_accessor,
+                "TEXCOORD_0": tex_coord_accessor,
+                "COLOR_0": color_accessor
+            },
+            "indices": index_accessor,
+            "mode": 4
+        });
+        if let Some(material_index) = material_index {
+            primitive_json["material"] = json!(material_index);
+        }
         let mesh_index = meshes.len();
         meshes.push(json!({
             "name": primitive.name.as_str(),
             "extras": { "roblox": primitive.extras },
-            "primitives": [{
-                "attributes": {
-                    "POSITION": position_accessor,
-                    "NORMAL": normal_accessor,
-                    "TEXCOORD_0": tex_coord_accessor,
-                    "COLOR_0": color_accessor
-                },
-                "indices": index_accessor,
-                "material": material_index,
-                "mode": 4
-            }]
+            "primitives": [primitive_json]
         }));
         nodes.push(json!({
             "name": primitive.name.as_str(),
@@ -153,21 +159,23 @@ pub(crate) fn model_to_gltf(
     }
 
     let binary_uri = relative_uri(gltf_output_dir, buffer_output_path)?;
-    let json_value = json!({
+    let mut json_value = json!({
         "asset": { "version": "2.0", "generator": "roform" },
         "extras": { "roblox": model.extras },
         "buffers": [{ "byteLength": binary.len(), "uri": binary_uri }],
         "bufferViews": buffer_views,
         "accessors": accessors,
-        "images": images,
-        "samplers": samplers,
-        "textures": textures,
-        "materials": materials,
         "meshes": meshes,
         "nodes": nodes,
         "scenes": [{ "nodes": (0..nodes.len()).collect::<Vec<_>>() }],
         "scene": 0
     });
+    if include_materials {
+        json_value["images"] = json!(images);
+        json_value["samplers"] = json!(samplers);
+        json_value["textures"] = json!(textures);
+        json_value["materials"] = json!(gltf_materials);
+    }
     let gltf = serde_json::to_vec_pretty(&json_value)
         .map_err(|error| format!("failed to serialize glTF: {error}"))?;
     write_binary_buffer(buffer_output_path, &binary)?;
@@ -630,6 +638,7 @@ mod tests {
             &model_dir,
             &root,
             &buffer_path,
+            true,
         )
         .unwrap();
         let document: Value = serde_json::from_slice(&gltf).unwrap();
@@ -661,6 +670,27 @@ mod tests {
             true
         );
         assert_eq!(fs::read(&buffer_path).unwrap().len(), 120);
+
+        let no_material_buffer_path = root.join("bin").join("triangle-nm.bin");
+        let no_material_gltf = model_to_gltf(
+            &model,
+            &root.join("download"),
+            &assets_dir,
+            &model_dir,
+            &root,
+            &no_material_buffer_path,
+            false,
+        )
+        .unwrap();
+        let no_material_document: Value = serde_json::from_slice(&no_material_gltf).unwrap();
+        assert!(no_material_document.get("materials").is_none());
+        assert!(no_material_document.get("images").is_none());
+        assert!(no_material_document.get("textures").is_none());
+        assert!(
+            no_material_document["meshes"][0]["primitives"][0]
+                .get("material")
+                .is_none()
+        );
 
         fs::remove_dir_all(root).unwrap();
     }

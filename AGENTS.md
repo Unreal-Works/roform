@@ -4,8 +4,9 @@ Please update this document after any relevant changes.
 
 ## Asset Pipeline
 
-- The CLI stages assets as `download`, decoded `mesh`, and hash-keyed `model` GLTF output. Decoded meshes are cached below `roform/mesh/<blake3-of-source-payload>.bin` in the versioned `ROFMESH1` format, with dependency content hashes cached in `roform/mesh/fingerprint.json`. Model GLTF files are written below `roform/model/<blake3-hash>.gltf`, with their external buffers in `roform/bin/<blake3-hash>.bin` and source/model names recorded in `roform/model/manifest.json`.
-- Passing `--glb` packages each successful model GLTF, including its buffer and textures, below `roform/glb/<blake3-hash>.glb` after GLTF export.
+- The CLI stages assets as `download`, decoded `mesh`, and hash-keyed `model` GLTF output. Decoded meshes are cached below `roform/mesh/<blake3-of-source-payload>.bin` in the versioned `ROFMESH1` format, with dependency content hashes cached in `roform/mesh/fingerprint.json`. Model GLTF files are written below `roform/model/<hash>.gltf`, or `roform/model/NM<hash>.gltf` with `--no-materials`; their external buffers use the matching stem in `roform/bin/`, and source/model names are recorded in `roform/model/manifest.json`.
+- Passing `--glb` packages each successful model GLTF, including its buffer and textures, below `roform/glb/<hash>.glb` or `roform/glb/NM<hash>.glb` after GLTF export.
+- Materials are enabled by default. `--no-materials` omits material assignments and material-related GLTF resources from exported models.
 - Model export embeds valid images from `assets/material/` as data URIs, using Roblox Material enum values from the official enum documentation when mapping material names. The generated model manifest records absolute source and output paths.
 - GLTF `extras.roblox` is populated automatically from the Roblox DOM and reflection database: it includes non-default serialized properties, their types, referents, and recursive child instances on the document root, geometry nodes, and their meshes. Properties matching reflection defaults are omitted; unknown serialized properties are retained without an allowlist.
 - The model manifest/cache format is versioned; bump the manifest version and model fingerprint discriminator when changing exported GLTF structure so stale files without metadata are regenerated.

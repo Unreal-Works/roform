@@ -5,7 +5,7 @@ mod metadata;
 mod model;
 mod pipeline;
 
-use clap::Parser;
+use clap::{ArgAction, Parser};
 use mhif::{DownloadOptions, download_assets, extract_asset_ids_cached};
 use std::{path::PathBuf, process::ExitCode};
 
@@ -26,6 +26,13 @@ struct Cli {
     assets_dir: PathBuf,
     #[arg(long, help = "Also package each exported GLTF as a GLB file")]
     glb: bool,
+    #[arg(
+        long = "no-materials",
+        default_value_t = true,
+        action = ArgAction::SetFalse,
+        help = "Do not assign materials to exported geometry"
+    )]
+    materials: bool,
     #[arg(
         long,
         value_name = "STUDS",
@@ -54,6 +61,7 @@ fn main() -> ExitCode {
         cli.out_dir,
         cli.assets_dir,
         cli.glb,
+        cli.materials,
         cli.studs_per_tile,
     ) {
         Ok(()) => ExitCode::SUCCESS,
@@ -69,6 +77,7 @@ fn run(
     out_dir: PathBuf,
     assets_dir: PathBuf,
     glb: bool,
+    materials: bool,
     studs_per_tile: f32,
 ) -> Result<(), String> {
     if !studs_per_tile.is_finite() || studs_per_tile <= 0.0 {
@@ -104,6 +113,7 @@ fn run(
         &assets_dir,
         &out_dir.join("model"),
         studs_per_tile,
+        materials,
     )?;
     for failure in &model_report.failed {
         eprintln!("failed model {}: {}", failure.source, failure.error);
@@ -134,4 +144,19 @@ fn run(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn materials_are_enabled_by_default_and_disabled_by_flag() {
+        let default_cli = Cli::try_parse_from(["roform", "input.rbxmx"]).unwrap();
+        assert!(default_cli.materials);
+
+        let no_materials_cli =
+            Cli::try_parse_from(["roform", "input.rbxmx", "--no-materials"]).unwrap();
+        assert!(!no_materials_cli.materials);
+    }
 }

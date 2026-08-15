@@ -39,6 +39,7 @@ pub(crate) struct GlbReport {
 struct ModelManifest {
     version: u32,
     studs_per_tile: f32,
+    includes_materials: bool,
     dependency_fingerprint: String,
     sources: Vec<ModelSourceManifestEntry>,
     models: Vec<ModelManifestEntry>,
@@ -78,6 +79,7 @@ pub(crate) fn export_models(
     assets_dir: &Path,
     output_dir: &Path,
     studs_per_tile: f32,
+    includes_materials: bool,
 ) -> Result<ModelReport, String> {
     let download_dir = absolute_path(download_dir)?;
     let mesh_dir = absolute_path(mesh_dir)?;
@@ -112,6 +114,7 @@ pub(crate) fn export_models(
             &dependency_fingerprint,
             source_entries,
             studs_per_tile,
+            includes_materials,
         )
     {
         return Ok(ModelReport {
@@ -161,13 +164,14 @@ pub(crate) fn export_models(
                 model_index,
                 studs_per_tile,
             );
-            let output_name = format!("{model_hash}.gltf");
+            let output_stem = model_output_stem(&model_hash, includes_materials);
+            let output_name = format!("{output_stem}.gltf");
             let output_path = output_dir.join(&output_name);
             let buffer_output_path = output_dir
                 .parent()
                 .unwrap_or(&output_dir)
                 .join("bin")
-                .join(format!("{model_hash}.bin"));
+                .join(format!("{output_stem}.bin"));
 
             for warning in &model_asset.warnings {
                 eprintln!(
@@ -197,6 +201,7 @@ pub(crate) fn export_models(
                 &output_dir,
                 output_dir.parent().unwrap_or(&output_dir),
                 &buffer_output_path,
+                includes_materials,
             ) {
                 Ok(gltf) => gltf,
                 Err(error) => {
@@ -229,6 +234,7 @@ pub(crate) fn export_models(
     let manifest = ModelManifest {
         version: MODEL_FORMAT_VERSION,
         studs_per_tile,
+        includes_materials,
         dependency_fingerprint,
         sources: source_entries.unwrap_or_default(),
         models: manifest_entries,
@@ -260,7 +266,11 @@ pub(crate) fn export_glbs(
     };
 
     for model in models {
-        let output_path = output_dir.join(format!("{}.glb", model.hash));
+        let output_stem = Path::new(&model.output)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| format!("invalid GLTF output path: {}", model.output))?;
+        let output_path = output_dir.join(format!("{output_stem}.glb"));
         if output_path.is_file() {
             report.cached += 1;
             continue;
@@ -328,6 +338,11 @@ fn model_fingerprint(
     hasher.finalize().to_hex().to_string()
 }
 
+fn model_output_stem(model_hash: &str, includes_materials: bool) -> String {
+    let prefix = if includes_materials { "" } else { "NM" };
+    format!("{prefix}{model_hash}")
+}
+
 fn source_manifest_entries(paths: &[PathBuf]) -> Option<Vec<ModelSourceManifestEntry>> {
     paths
         .iter()
@@ -346,11 +361,13 @@ fn reusable_models(
     dependency_fingerprint: &str,
     sources: &[ModelSourceManifestEntry],
     studs_per_tile: f32,
+    includes_materials: bool,
 ) -> Option<Vec<ModelManifestEntry>> {
     let manifest_bytes = fs::read(output_dir.join("manifest.json")).ok()?;
     let manifest: ModelManifest = serde_json::from_slice(&manifest_bytes).ok()?;
     if manifest.version != MODEL_FORMAT_VERSION
         || manifest.studs_per_tile != studs_per_tile
+        || manifest.includes_materials != includes_materials
         || manifest.dependency_fingerprint != dependency_fingerprint
         || manifest.sources != sources
     {
@@ -359,8 +376,14 @@ fn reusable_models(
 
     let buffer_dir = output_dir.parent().unwrap_or(output_dir).join("bin");
     if manifest.models.iter().all(|model| {
+        let Some(output_stem) = Path::new(&model.output)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+        else {
+            return false;
+        };
         Path::new(&model.output).is_file()
-            && buffer_dir.join(format!("{}.bin", model.hash)).is_file()
+            && buffer_dir.join(format!("{output_stem}.bin")).is_file()
     }) {
         Some(manifest.models)
     } else {
