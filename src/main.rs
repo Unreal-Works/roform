@@ -1,12 +1,6 @@
-mod csg;
-mod geometry;
-mod gltf;
-mod metadata;
-mod model;
-mod pipeline;
-
 use clap::{ArgAction, Parser};
 use mhif::{DownloadOptions, download_assets, extract_asset_ids_cached};
+use roform::{ModelExportOptions, export_glbs, export_models};
 use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Debug, Parser)]
@@ -113,13 +107,13 @@ fn run(
     );
 
     let model_start_time = std::time::Instant::now();
-    let model_report = pipeline::export_models(
+    let model_report = export_models(
         &input,
         &download_out_dir,
         &out_dir.join("mesh"),
         &assets_dir,
         &out_dir.join("model"),
-        pipeline::ModelExportOptions {
+        ModelExportOptions {
             studs_per_tile,
             includes_materials: materials,
             recompile,
@@ -139,8 +133,7 @@ fn run(
 
     if glb {
         let glb_start_time = std::time::Instant::now();
-        let glb_report =
-            pipeline::export_glbs(&model_report.models, &out_dir.join("glb"), recompile)?;
+        let glb_report = export_glbs(&model_report.models, &out_dir.join("glb"), recompile)?;
         println!(
             "glb: exported {}, reused {}, failed {} -> {} in {:.2}s",
             glb_report.exported,

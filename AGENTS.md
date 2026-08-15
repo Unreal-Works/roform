@@ -21,6 +21,8 @@ Please update this document after any relevant changes.
 ## Module Boundaries
 
 - `main.rs` owns CLI parsing and stage-level progress output.
+- `lib.rs` is the documented library entry point; it exposes the pipeline API
+  while keeping format and conversion internals private.
 - `pipeline.rs` owns model/GLB export orchestration, manifests, fingerprints, and cache reuse.
 - `model.rs` converts Roblox DOM instances into renderable model assets and handles downloaded mesh loading.
 - `geometry.rs` owns generated primitive topology, normals, and UV projection.

@@ -13,26 +13,42 @@ use std::{
 const MODEL_FORMAT_VERSION: u32 = 1;
 const MISSING_DEPENDENCY_HASH: &str = "<missing>";
 
+/// The result of exporting the models found in an input path.
 #[derive(Debug)]
-pub(crate) struct ModelReport {
+pub struct ModelReport {
+    /// Number of models written as new GLTF files during this call.
     pub exported: usize,
+    /// Number of models reused from the model cache during this call.
     pub cached: usize,
+    /// Models that could not be exported. These failures are accumulated so
+    /// that other sources can still be processed.
     pub failed: Vec<ModelFailure>,
+    /// Successfully exported or reused models for the requested input.
     pub models: Vec<ModelManifestEntry>,
+    /// Absolute directory containing the model GLTF files and manifest.
     pub output_directory: PathBuf,
 }
 
+/// A model that failed during an export stage.
 #[derive(Debug)]
-pub(crate) struct ModelFailure {
+pub struct ModelFailure {
+    /// Source file or model name associated with the failure.
     pub source: String,
+    /// Human-readable description of the failure.
     pub error: String,
 }
 
+/// The result of packaging model GLTF files as GLB files.
 #[derive(Debug)]
-pub(crate) struct GlbReport {
+pub struct GlbReport {
+    /// Number of GLB files written as new files during this call.
     pub exported: usize,
+    /// Number of GLB files reused from the output directory during this call.
     pub cached: usize,
+    /// Models whose GLB files could not be packaged. These failures are
+    /// accumulated so that other models can still be processed.
     pub failed: Vec<ModelFailure>,
+    /// Absolute directory containing the GLB files.
     pub output_directory: PathBuf,
 }
 
@@ -46,11 +62,20 @@ struct ModelManifest {
     models: Vec<ModelManifestEntry>,
 }
 
+/// Metadata for a model GLTF file produced by [`export_models`].
+///
+/// Entries returned by [`ModelReport::models`] can be passed to
+/// [`export_glbs`]. The paths are absolute and use forward slashes so they can
+/// be stored consistently in the manifest on every platform.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct ModelManifestEntry {
+pub struct ModelManifestEntry {
+    /// Content and configuration hash used as the model output stem.
     pub hash: String,
+    /// Absolute path to the model GLTF file.
     pub output: String,
+    /// Absolute path to the Roblox source file.
     pub source: String,
+    /// Name of the Roblox model represented by the file.
     pub name: String,
 }
 
@@ -74,14 +99,58 @@ struct FingerprintCacheEntry {
     hash: String,
 }
 
+/// Options controlling model GLTF export.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ModelExportOptions {
+pub struct ModelExportOptions {
+    /// Number of Roblox studs represented by one texture tile.
+    ///
+    /// This value must be finite and greater than zero. The default is `1.0`.
     pub studs_per_tile: f32,
+    /// Whether material definitions and available material textures are
+    /// included in the exported GLTF. The default is `true`.
     pub includes_materials: bool,
+    /// Whether existing model GLTF files should be ignored and regenerated.
+    /// Cached downloads and decoded meshes are still reusable. The default is
+    /// `false`.
     pub recompile: bool,
 }
 
-pub(crate) fn export_models(
+impl Default for ModelExportOptions {
+    fn default() -> Self {
+        Self {
+            studs_per_tile: 1.0,
+            includes_materials: true,
+            recompile: false,
+        }
+    }
+}
+
+impl ModelExportOptions {
+    fn validate(self) -> Result<(), String> {
+        if !self.studs_per_tile.is_finite() || self.studs_per_tile <= 0.0 {
+            return Err("studs_per_tile must be finite and greater than zero".to_owned());
+        }
+        Ok(())
+    }
+}
+
+/// Export the Roblox models found at `input` as GLTF files.
+///
+/// `input` may be a single `.rbxm`, `.rbxmx`, `.rbxl`, or `.rbxlx` file, or a
+/// directory that is searched recursively for those extensions. Relative paths
+/// are resolved against the current working directory. `download_dir` must
+/// contain downloaded Roblox assets referenced by the input, and `assets_dir`
+/// may contain fallback material images. `mesh_dir` stores decoded mesh cache
+/// files and `output_dir` stores model GLTF files, external buffers, and the
+/// model manifest.
+///
+/// A successful result can still contain entries in [`ModelReport::failed`].
+/// Per-source and per-model failures are reported there while processing
+/// continues; failures to prepare the export directories, serialize the
+/// manifest, or write model output are returned as `Err`. Dependency
+/// fingerprint cache write failures are reported as warnings because the
+/// cache can be rebuilt on the next call.
+pub fn export_models(
     input: &Path,
     download_dir: &Path,
     mesh_dir: &Path,
@@ -89,6 +158,7 @@ pub(crate) fn export_models(
     output_dir: &Path,
     options: ModelExportOptions,
 ) -> Result<ModelReport, String> {
+    options.validate()?;
     let ModelExportOptions {
         studs_per_tile,
         includes_materials,
@@ -321,7 +391,18 @@ pub(crate) fn export_models(
     Ok(report)
 }
 
-pub(crate) fn export_glbs(
+/// Package model GLTF files as GLB files.
+///
+/// Pass the [`ModelManifestEntry`] values returned in [`ModelReport::models`]
+/// by [`export_models`]. The GLTF paths in those entries are read as absolute
+/// paths, while `output_dir` is resolved against the current working directory
+/// when it is relative. Each GLB contains the external buffer and any images
+/// referenced by its source GLTF.
+///
+/// Existing GLB files are reused unless `recompile` is `true`. A successful
+/// result can still contain entries in [`GlbReport::failed`]; failures for one
+/// model do not prevent the remaining models from being packaged.
+pub fn export_glbs(
     models: &[ModelManifestEntry],
     output_dir: &Path,
     recompile: bool,
