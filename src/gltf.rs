@@ -25,6 +25,7 @@ pub(crate) fn union_to_glb(mesh: &UnionMesh) -> Vec<u8> {
 
     let (min_position, max_position) = position_bounds(mesh);
     let json_value = json!({
+        "asset": { "version": "2.0", "generator": "roform" },
         "buffers": [{ "byteLength": binary.len() }],
         "bufferViews": [
             { "buffer": 0, "byteOffset": 0, "byteLength": index_offset, "byteStride": vertex_stride, "target": 34962 },
