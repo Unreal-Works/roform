@@ -13,6 +13,8 @@ use std::{
     time::UNIX_EPOCH,
 };
 
+const MODEL_FORMAT_VERSION: u32 = 1;
+
 #[derive(Debug, Parser)]
 #[command(
     version,
@@ -346,7 +348,7 @@ fn export_models(
     }
 
     let manifest = ModelManifest {
-        version: 2,
+        version: MODEL_FORMAT_VERSION,
         dependency_fingerprint,
         sources: source_entries.unwrap_or_default(),
         models: manifest_entries,
@@ -422,7 +424,7 @@ fn model_fingerprint(
     model_index: usize,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"roform-model-v2");
+    hasher.update(format!("roform-model-v{MODEL_FORMAT_VERSION}").as_bytes());
     hasher.update(source_bytes);
     hasher.update(dependency_fingerprint.as_bytes());
     hasher.update(model.name.as_bytes());
@@ -451,7 +453,7 @@ fn reusable_models(
 ) -> Option<Vec<ModelManifestEntry>> {
     let manifest_bytes = fs::read(output_dir.join("manifest.json")).ok()?;
     let manifest: ModelManifest = serde_json::from_slice(&manifest_bytes).ok()?;
-    if manifest.version != 2
+    if manifest.version != MODEL_FORMAT_VERSION
         || manifest.dependency_fingerprint != dependency_fingerprint
         || manifest.sources != sources
     {
