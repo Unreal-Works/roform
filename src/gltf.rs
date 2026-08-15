@@ -32,6 +32,17 @@ pub(crate) fn model_to_gltf(
     let mut textures = Vec::new();
     let mut material_indices = HashMap::<String, usize>::new();
     let mut image_indices = HashMap::<PathBuf, usize>::new();
+    let mut material_export = MaterialExport {
+        download_dir,
+        assets_dir,
+        gltf_output_dir,
+        asset_output_dir,
+        material_indices: &mut material_indices,
+        materials: &mut materials,
+        image_indices: &mut image_indices,
+        images: &mut images,
+        textures: &mut textures,
+    };
 
     for primitive in &model.primitives {
         let vertex_offset = binary.len();
@@ -115,21 +126,11 @@ pub(crate) fn model_to_gltf(
             "type": "SCALAR"
         }));
 
-        let material_index = material_index(
-            &primitive.material,
-            download_dir,
-            assets_dir,
-            gltf_output_dir,
-            asset_output_dir,
-            &mut material_indices,
-            &mut materials,
-            &mut image_indices,
-            &mut images,
-            &mut textures,
-        )?;
+        let material_index = material_export.material_index(&primitive.material)?;
         let mesh_index = meshes.len();
         meshes.push(json!({
             "name": primitive.name.as_str(),
+            "extras": { "roblox": primitive.extras },
             "primitives": [{
                 "attributes": {
                     "POSITION": position_accessor,
@@ -145,13 +146,15 @@ pub(crate) fn model_to_gltf(
         nodes.push(json!({
             "name": primitive.name.as_str(),
             "mesh": mesh_index,
-            "matrix": primitive.matrix
+            "matrix": primitive.matrix,
+            "extras": { "roblox": primitive.extras }
         }));
     }
 
     let binary_uri = relative_uri(gltf_output_dir, buffer_output_path)?;
     let json_value = json!({
         "asset": { "version": "2.0", "generator": "roform" },
+        "extras": { "roblox": model.extras },
         "buffers": [{ "byteLength": binary.len(), "uri": binary_uri }],
         "bufferViews": buffer_views,
         "accessors": accessors,
@@ -292,125 +295,104 @@ fn write_binary_buffer(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|error| format!("failed to write GLTF buffer {}: {error}", path.display()))
 }
 
-fn material_index(
-    material: &ModelMaterial,
-    download_dir: &Path,
-    assets_dir: &Path,
-    gltf_output_dir: &Path,
-    asset_output_dir: &Path,
-    material_indices: &mut HashMap<String, usize>,
-    materials: &mut Vec<serde_json::Value>,
-    image_indices: &mut HashMap<PathBuf, usize>,
-    images: &mut Vec<serde_json::Value>,
-    textures: &mut Vec<serde_json::Value>,
-) -> Result<usize, String> {
-    let key = format!(
-        "{}:{:?}:{:?}:{:?}",
-        material.name, material.color, material.base_color_asset, material.normal_asset
-    );
-    if let Some(index) = material_indices.get(&key) {
-        return Ok(*index);
-    }
-
-    let base_color = material_image(
-        material,
-        true,
-        download_dir,
-        assets_dir,
-        gltf_output_dir,
-        asset_output_dir,
-        image_indices,
-        images,
-        textures,
-    )?;
-    let normal = material_image(
-        material,
-        false,
-        download_dir,
-        assets_dir,
-        gltf_output_dir,
-        asset_output_dir,
-        image_indices,
-        images,
-        textures,
-    )?;
-    let mut pbr = json!({
-        "baseColorFactor": material.color,
-        "metallicFactor": 0.0,
-        "roughnessFactor": 0.8
-    });
-    if let Some(image_index) = base_color {
-        pbr["baseColorTexture"] = json!({ "index": image_index });
-    }
-    let mut material_json = json!({
-        "name": material.name.as_str(),
-        "pbrMetallicRoughness": pbr,
-        "doubleSided": true
-    });
-    if let Some(image_index) = normal {
-        material_json["normalTexture"] = json!({ "index": image_index });
-    }
-    if material.color[3] < 1.0 {
-        material_json["alphaMode"] = json!("BLEND");
-    }
-
-    let index = materials.len();
-    materials.push(material_json);
-    material_indices.insert(key, index);
-    Ok(index)
+struct MaterialExport<'a> {
+    download_dir: &'a Path,
+    assets_dir: &'a Path,
+    gltf_output_dir: &'a Path,
+    asset_output_dir: &'a Path,
+    material_indices: &'a mut HashMap<String, usize>,
+    materials: &'a mut Vec<serde_json::Value>,
+    image_indices: &'a mut HashMap<PathBuf, usize>,
+    images: &'a mut Vec<serde_json::Value>,
+    textures: &'a mut Vec<serde_json::Value>,
 }
 
-fn material_image(
-    material: &ModelMaterial,
-    base_color: bool,
-    download_dir: &Path,
-    assets_dir: &Path,
-    gltf_output_dir: &Path,
-    asset_output_dir: &Path,
-    image_indices: &mut HashMap<PathBuf, usize>,
-    images: &mut Vec<serde_json::Value>,
-    textures: &mut Vec<serde_json::Value>,
-) -> Result<Option<usize>, String> {
-    let (asset_id, fallback_name) = if base_color {
-        (
-            material.base_color_asset.as_deref(),
-            format!("{}_color.png", material.name),
-        )
-    } else {
-        (
-            material.normal_asset.as_deref(),
-            format!("{}_normal.png", material.name),
-        )
-    };
-    let asset_path = asset_id.map(|asset_id| download_dir.join(asset_id).join("asset.bin"));
-    let fallback_path = assets_dir.join("material").join(fallback_name);
-    let source_path = asset_path
-        .filter(|path| path.is_file())
-        .or_else(|| fallback_path.is_file().then_some(fallback_path));
-    let Some(source_path) = source_path else {
-        return Ok(None);
-    };
+impl MaterialExport<'_> {
+    fn material_index(&mut self, material: &ModelMaterial) -> Result<usize, String> {
+        let key = format!(
+            "{}:{:?}:{:?}:{:?}",
+            material.name, material.color, material.base_color_asset, material.normal_asset
+        );
+        if let Some(index) = self.material_indices.get(&key) {
+            return Ok(*index);
+        }
 
-    if let Some(index) = image_indices.get(&source_path) {
-        return Ok(Some(*index));
+        let base_color = self.material_image(material, true)?;
+        let normal = self.material_image(material, false)?;
+        let mut pbr = json!({
+            "baseColorFactor": material.color,
+            "metallicFactor": 0.0,
+            "roughnessFactor": 0.8
+        });
+        if let Some(image_index) = base_color {
+            pbr["baseColorTexture"] = json!({ "index": image_index });
+        }
+        let mut material_json = json!({
+            "name": material.name.as_str(),
+            "pbrMetallicRoughness": pbr,
+            "doubleSided": true
+        });
+        if let Some(image_index) = normal {
+            material_json["normalTexture"] = json!({ "index": image_index });
+        }
+        if material.color[3] < 1.0 {
+            material_json["alphaMode"] = json!("BLEND");
+        }
+
+        let index = self.materials.len();
+        self.materials.push(material_json);
+        self.material_indices.insert(key, index);
+        Ok(index)
     }
-    let bytes = fs::read(&source_path)
-        .map_err(|error| format!("failed to read texture {}: {error}", source_path.display()))?;
-    let Some(mime_type) = image_mime_type(&bytes) else {
-        return Ok(None);
-    };
-    let output_path = stage_asset(&source_path, assets_dir, asset_output_dir)?;
-    let uri = relative_uri(gltf_output_dir, &output_path)?;
-    let image_index = images.len();
-    images.push(json!({
-        "name": output_path.file_name().and_then(|name| name.to_str()),
-        "mimeType": mime_type,
-        "uri": uri
-    }));
-    let texture_index = textures.len();
-    textures.push(json!({ "source": image_index }));
-    image_indices.insert(source_path, texture_index);
-    Ok(Some(texture_index))
+
+    fn material_image(
+        &mut self,
+        material: &ModelMaterial,
+        base_color: bool,
+    ) -> Result<Option<usize>, String> {
+        let (asset_id, fallback_name) = if base_color {
+            (
+                material.base_color_asset.as_deref(),
+                format!("{}_color.png", material.name),
+            )
+        } else {
+            (
+                material.normal_asset.as_deref(),
+                format!("{}_normal.png", material.name),
+            )
+        };
+        let asset_path =
+            asset_id.map(|asset_id| self.download_dir.join(asset_id).join("asset.bin"));
+        let fallback_path = self.assets_dir.join("material").join(fallback_name);
+        let source_path = asset_path
+            .filter(|path| path.is_file())
+            .or_else(|| fallback_path.is_file().then_some(fallback_path));
+        let Some(source_path) = source_path else {
+            return Ok(None);
+        };
+
+        if let Some(index) = self.image_indices.get(&source_path) {
+            return Ok(Some(*index));
+        }
+        let bytes = fs::read(&source_path).map_err(|error| {
+            format!("failed to read texture {}: {error}", source_path.display())
+        })?;
+        let Some(mime_type) = image_mime_type(&bytes) else {
+            return Ok(None);
+        };
+        let output_path = stage_asset(&source_path, self.assets_dir, self.asset_output_dir)?;
+        let uri = relative_uri(self.gltf_output_dir, &output_path)?;
+        let image_index = self.images.len();
+        self.images.push(json!({
+            "name": output_path.file_name().and_then(|name| name.to_str()),
+            "mimeType": mime_type,
+            "uri": uri
+        }));
+        let texture_index = self.textures.len();
+        self.textures.push(json!({ "source": image_index }));
+        self.image_indices.insert(source_path, texture_index);
+        Ok(Some(texture_index))
+    }
 }
 
 fn stage_asset(
@@ -497,7 +479,7 @@ fn position_bounds(mesh: &UnionMesh) -> (Bounds, Bounds) {
 struct Bounds([f32; 3]);
 
 fn pad_to_four(bytes: &mut Vec<u8>, value: u8) {
-    while bytes.len() % 4 != 0 {
+    while !bytes.len().is_multiple_of(4) {
         bytes.push(value);
     }
 }
@@ -622,7 +604,15 @@ mod tests {
                     base_color_asset: None,
                     normal_asset: None,
                 },
+                extras: json!({
+                    "className": "Part",
+                    "properties": { "Anchored": true }
+                }),
             }],
+            extras: json!({
+                "className": "Model",
+                "properties": { "PrimaryPart": { "Ref": "none" } }
+            }),
             warnings: Vec::new(),
         };
 
@@ -646,6 +636,19 @@ mod tests {
         assert_eq!(
             document["buffers"][0]["byteLength"].as_u64(),
             Some(fs::metadata(&buffer_path).unwrap().len())
+        );
+        assert_eq!(document["extras"]["roblox"]["className"], "Model");
+        assert_eq!(
+            document["extras"]["roblox"]["properties"]["PrimaryPart"]["Ref"],
+            "none"
+        );
+        assert_eq!(
+            document["nodes"][0]["extras"]["roblox"]["className"],
+            "Part"
+        );
+        assert_eq!(
+            document["meshes"][0]["extras"]["roblox"]["properties"]["Anchored"],
+            true
         );
         assert_eq!(fs::read(&buffer_path).unwrap().len(), 120);
 

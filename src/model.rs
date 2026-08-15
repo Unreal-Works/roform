@@ -3,9 +3,11 @@ use crate::{
     decode_mesh_payload,
 };
 use rbx_dom_weak::{Instance, WeakDom, types::Ref};
+use rbx_reflection::{DataType, ReflectionDatabase};
 use rbx_types::{CFrame, Variant, Vector3};
+use serde_json::{Map, Value, json};
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs,
     io::BufReader,
     path::{Path, PathBuf},
@@ -15,6 +17,7 @@ use std::{
 pub(crate) struct ModelAsset {
     pub name: String,
     pub primitives: Vec<ModelPrimitive>,
+    pub extras: Value,
     pub warnings: Vec<String>,
 }
 
@@ -24,6 +27,7 @@ pub(crate) struct ModelPrimitive {
     pub mesh: UnionMesh,
     pub matrix: [f32; 16],
     pub material: ModelMaterial,
+    pub extras: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +140,8 @@ fn parse_model(
     let root = dom
         .get_by_ref(root_ref)
         .ok_or_else(|| "model root referent is missing from the DOM".to_owned())?;
+    let reflection_database = reflection_database();
+    let model_extras = roblox_instance_extras(dom, root_ref, reflection_database);
     let pivot = property_cframe(root, "WorldPivotData")
         .or_else(|| property_cframe(root, "ModelMeshCFrame"))
         .unwrap_or_else(CFrame::identity);
@@ -240,6 +246,7 @@ fn parse_model(
                 mesh,
                 matrix,
                 material,
+                extras: roblox_instance_extras(dom, geometry_ref, reflection_database),
             });
         }
     }
@@ -247,6 +254,7 @@ fn parse_model(
     Ok(ModelAsset {
         name: root.name.clone(),
         primitives,
+        extras: model_extras,
         warnings,
     })
 }
@@ -847,6 +855,125 @@ fn is_class(instance: &Instance, class: &str) -> bool {
     instance.class.as_str() == class
 }
 
+fn reflection_database() -> &'static ReflectionDatabase<'static> {
+    rbx_reflection_database::get().unwrap_or_else(|_| rbx_reflection_database::get_bundled())
+}
+
+fn roblox_instance_extras(
+    dom: &WeakDom,
+    instance_ref: Ref,
+    database: &ReflectionDatabase<'static>,
+) -> Value {
+    let Some(instance) = dom.get_by_ref(instance_ref) else {
+        return Value::Null;
+    };
+
+    let (properties, serialized_properties, property_types) =
+        discovered_properties(instance, database);
+    let children = instance
+        .children()
+        .iter()
+        .map(|child_ref| roblox_instance_extras(dom, *child_ref, database))
+        .collect::<Vec<_>>();
+
+    let mut extras = Map::new();
+    extras.insert("className".to_owned(), json!(instance.class.as_str()));
+    extras.insert("name".to_owned(), json!(instance.name));
+    extras.insert(
+        "referent".to_owned(),
+        json!(instance.referent().to_string()),
+    );
+    extras.insert("properties".to_owned(), Value::Object(properties));
+    if !serialized_properties.is_empty() {
+        extras.insert(
+            "serializedProperties".to_owned(),
+            Value::Object(serialized_properties),
+        );
+    }
+    if !property_types.is_empty() {
+        extras.insert("propertyTypes".to_owned(), Value::Object(property_types));
+    }
+    if !children.is_empty() {
+        extras.insert("children".to_owned(), Value::Array(children));
+    }
+    Value::Object(extras)
+}
+
+fn discovered_properties(
+    instance: &Instance,
+    database: &ReflectionDatabase<'static>,
+) -> (Map<String, Value>, Map<String, Value>, Map<String, Value>) {
+    let class_descriptor = database.classes.get(instance.class.as_str());
+    let mut property_names = BTreeSet::new();
+    let mut reflected_property_types = Map::new();
+
+    if let Some(class_descriptor) = class_descriptor {
+        for descriptor in database.superclasses_iter(class_descriptor) {
+            for (name, property) in &descriptor.properties {
+                let name = (*name).to_owned();
+                property_names.insert(name.clone());
+                reflected_property_types
+                    .insert(name, json!(reflection_data_type_name(&property.data_type)));
+            }
+        }
+    }
+
+    for name in instance.properties.keys() {
+        let name = name.to_string();
+        property_names.insert(name.clone());
+    }
+
+    let mut properties = Map::new();
+    let mut serialized_properties = Map::new();
+    let mut property_types = Map::new();
+    for name in property_names {
+        let Some(value) = instance.properties.get(&name.clone().into()) else {
+            continue;
+        };
+        let is_default = class_descriptor
+            .and_then(|class_descriptor| database.find_default_property(class_descriptor, &name))
+            .is_some_and(|default| value == default);
+        if is_default {
+            continue;
+        }
+
+        let value_json = variant_to_json(value);
+        properties.insert(name.clone(), value_json.clone());
+        serialized_properties.insert(name.clone(), value_json);
+        property_types.insert(
+            name.clone(),
+            reflected_property_types
+                .get(&name)
+                .cloned()
+                .unwrap_or_else(|| json!(variant_type_name(value))),
+        );
+    }
+
+    (properties, serialized_properties, property_types)
+}
+
+fn reflection_data_type_name(data_type: &DataType<'_>) -> String {
+    match data_type {
+        DataType::Value(variant_type) => format!("{variant_type:?}"),
+        DataType::Enum(enum_name) => format!("Enum<{enum_name}>"),
+        _ => "Unknown".to_owned(),
+    }
+}
+
+fn variant_type_name(value: &Variant) -> String {
+    format!("{:?}", value.ty())
+}
+
+fn variant_to_json(value: &Variant) -> Value {
+    serde_json::to_value(value).unwrap_or_else(|error| {
+        json!({
+            "type": variant_type_name(value),
+            "debug": format!("{value:?}"),
+            "serializationError": error.to_string()
+        })
+    })
+}
+
 fn property_asset_id(instance: &Instance, property: &str) -> Option<String> {
     let value = instance.properties.get(&property.into())?;
     let uri = match value {
@@ -1043,6 +1170,7 @@ fn matrix_rows(cframe: CFrame) -> [[f32; 3]; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rbx_dom_weak::InstanceBuilder;
 
     #[test]
     fn parses_asset_ids_from_roblox_urls() {
@@ -1108,5 +1236,41 @@ mod tests {
 
         assert_eq!(mesh.vertices[0].position, [-1.0, -2.0, -3.0]);
         assert_eq!(mesh.vertices[1].position, [1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn discovers_serialized_unknown_and_inherited_properties() {
+        let dom = WeakDom::new(
+            InstanceBuilder::new("Part")
+                .with_name("MetadataPart")
+                .with_property("Anchored", true)
+                .with_property("CustomMetadata", "kept")
+                .with_child(InstanceBuilder::new("Folder").with_name("Child")),
+        );
+        let extras = roblox_instance_extras(&dom, dom.root_ref(), reflection_database());
+
+        assert_eq!(extras["className"], "Part");
+        assert_eq!(extras["properties"]["Anchored"]["Bool"], true);
+        assert_eq!(
+            extras["serializedProperties"]["CustomMetadata"]["String"],
+            "kept"
+        );
+        assert_eq!(extras["propertyTypes"]["Anchored"], "Bool");
+        assert_eq!(extras["children"][0]["name"], "Child");
+    }
+
+    #[test]
+    fn omits_properties_equal_to_reflection_defaults() {
+        let dom = WeakDom::new(
+            InstanceBuilder::new("Part")
+                .with_property("Anchored", false)
+                .with_property("CustomMetadata", "kept"),
+        );
+        let extras = roblox_instance_extras(&dom, dom.root_ref(), reflection_database());
+
+        assert!(extras["properties"].get("Anchored").is_none());
+        assert!(extras["serializedProperties"].get("Anchored").is_none());
+        assert!(extras["propertyTypes"].get("Anchored").is_none());
+        assert_eq!(extras["properties"]["CustomMetadata"]["String"], "kept");
     }
 }

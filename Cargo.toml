@@ -13,8 +13,9 @@ mhif = { version = "0.4.0", default-features = false }
 rbx_dom_weak = "4.2"
 rbx_binary = "3.0"
 rbx_mesh = { git = "https://github.com/evilbocchi/rbx_mesh", rev = "4d0f89203d6e4356ffa49b111d4db68953dee043" }
+rbx_reflection = "7.0"
 rbx_reflection_database = "3.0"
-rbx_types = "3.1"
+rbx_types = { version = "3.1", features = ["serde"] }
 rbx_xml = "3.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
