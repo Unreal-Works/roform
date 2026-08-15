@@ -3,7 +3,6 @@ use rbx_mesh::{
     read_mesh_versioned, read_union_graphics_versioned,
     union_graphics::UnionGraphics,
 };
-use sha2::{Digest, Sha256};
 use std::{io::Cursor, ops::Range};
 use thiserror::Error;
 
@@ -67,10 +66,6 @@ pub(crate) fn payload_version(bytes: &[u8]) -> String {
         return "CSGMDL5".to_owned();
     }
     "unknown".to_owned()
-}
-
-pub(crate) fn payload_hash(bytes: &[u8]) -> String {
-    format!("sha256-{:x}", Sha256::digest(bytes))
 }
 
 pub(crate) fn decode_union_graphics(bytes: &[u8]) -> Result<UnionMesh, CsgError> {
