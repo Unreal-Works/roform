@@ -14,6 +14,8 @@ pub(crate) fn model_to_gltf(
     model: &ModelAsset,
     download_dir: &Path,
     assets_dir: &Path,
+    gltf_output_dir: &Path,
+    asset_output_dir: &Path,
 ) -> Result<Vec<u8>, String> {
     if model.primitives.is_empty() {
         return Err("model contains no renderable geometry".to_owned());
@@ -117,6 +119,8 @@ pub(crate) fn model_to_gltf(
             &primitive.material,
             download_dir,
             assets_dir,
+            gltf_output_dir,
+            asset_output_dir,
             &mut material_indices,
             &mut materials,
             &mut image_indices,
@@ -170,6 +174,8 @@ fn material_index(
     material: &ModelMaterial,
     download_dir: &Path,
     assets_dir: &Path,
+    gltf_output_dir: &Path,
+    asset_output_dir: &Path,
     material_indices: &mut HashMap<String, usize>,
     materials: &mut Vec<serde_json::Value>,
     image_indices: &mut HashMap<PathBuf, usize>,
@@ -189,6 +195,8 @@ fn material_index(
         true,
         download_dir,
         assets_dir,
+        gltf_output_dir,
+        asset_output_dir,
         image_indices,
         images,
         textures,
@@ -198,6 +206,8 @@ fn material_index(
         false,
         download_dir,
         assets_dir,
+        gltf_output_dir,
+        asset_output_dir,
         image_indices,
         images,
         textures,
@@ -233,6 +243,8 @@ fn material_image(
     base_color: bool,
     download_dir: &Path,
     assets_dir: &Path,
+    gltf_output_dir: &Path,
+    asset_output_dir: &Path,
     image_indices: &mut HashMap<PathBuf, usize>,
     images: &mut Vec<serde_json::Value>,
     textures: &mut Vec<serde_json::Value>,
@@ -265,14 +277,11 @@ fn material_image(
     let Some(mime_type) = image_mime_type(&bytes) else {
         return Ok(None);
     };
-    let uri = format!(
-        "data:{};base64,{}",
-        mime_type,
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    );
+    let output_path = stage_asset(&source_path, assets_dir, asset_output_dir)?;
+    let uri = relative_uri(gltf_output_dir, &output_path)?;
     let image_index = images.len();
     images.push(json!({
-        "name": source_path.file_name().and_then(|name| name.to_str()),
+        "name": output_path.file_name().and_then(|name| name.to_str()),
         "mimeType": mime_type,
         "uri": uri
     }));
@@ -280,6 +289,57 @@ fn material_image(
     textures.push(json!({ "source": image_index }));
     image_indices.insert(source_path, texture_index);
     Ok(Some(texture_index))
+}
+
+fn stage_asset(source_path: &Path, assets_dir: &Path, output_dir: &Path) -> Result<PathBuf, String> {
+    let Ok(relative_path) = source_path.strip_prefix(assets_dir) else {
+        return Ok(source_path.to_owned());
+    };
+    let output_path = output_dir.join(relative_path);
+    if output_path != source_path {
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create staged asset directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        fs::copy(source_path, &output_path).map_err(|error| {
+            format!(
+                "failed to copy asset {} to {}: {error}",
+                source_path.display(),
+                output_path.display()
+            )
+        })?;
+    }
+    Ok(output_path)
+}
+
+fn relative_uri(from_dir: &Path, to: &Path) -> Result<String, String> {
+    let from_components: Vec<_> = from_dir.components().collect();
+    let to_components: Vec<_> = to.components().collect();
+    let common = from_components
+        .iter()
+        .zip(&to_components)
+        .take_while(|(from, to)| from == to)
+        .count();
+    if common == 0 {
+        return Err(format!(
+            "cannot create a relative asset URI from {} to {}",
+            from_dir.display(),
+            to.display()
+        ));
+    }
+
+    let mut relative = PathBuf::new();
+    for _ in common..from_components.len() {
+        relative.push("..");
+    }
+    for component in &to_components[common..] {
+        relative.push(component.as_os_str());
+    }
+    Ok(relative.to_string_lossy().replace('\\', "/"))
 }
 
 fn image_mime_type(bytes: &[u8]) -> Option<&'static str> {

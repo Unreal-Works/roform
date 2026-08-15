@@ -147,6 +147,8 @@ fn export_models(
     assets_dir: &Path,
     output_dir: &Path,
 ) -> Result<ModelReport, String> {
+    let download_dir = absolute_path(download_dir)?;
+    let assets_dir = absolute_path(assets_dir)?;
     let output_dir = absolute_path(output_dir)?;
     fs::create_dir_all(&output_dir).map_err(|error| {
         format!(
@@ -156,7 +158,7 @@ fn export_models(
     })?;
 
     let source_files = model::source_files(input)?;
-    let dependency_fingerprint = tree_fingerprint(download_dir, assets_dir)?;
+    let dependency_fingerprint = tree_fingerprint(&download_dir, &assets_dir)?;
     let mut manifest_entries = Vec::new();
     let mut report = ModelReport {
         exported: 0,
@@ -177,7 +179,7 @@ fn export_models(
                 continue;
             }
         };
-        let models = match model::parse_models(&source_path, download_dir) {
+        let models = match model::parse_models(&source_path, &download_dir) {
             Ok(models) => models,
             Err(error) => {
                 report.failed.push(ModelFailure {
@@ -216,7 +218,13 @@ fn export_models(
                 continue;
             }
 
-            let gltf = match gltf::model_to_gltf(&model_asset, download_dir, assets_dir) {
+            let gltf = match gltf::model_to_gltf(
+                &model_asset,
+                &download_dir,
+                &assets_dir,
+                &output_dir,
+                output_dir.parent().unwrap_or(&output_dir),
+            ) {
                 Ok(gltf) => gltf,
                 Err(error) => {
                     report.failed.push(ModelFailure {
@@ -262,7 +270,7 @@ fn model_fingerprint(
     model_index: usize,
 ) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"roform-model-v1");
+    hasher.update(b"roform-model-v2");
     hasher.update(source_bytes);
     hasher.update(dependency_fingerprint.as_bytes());
     hasher.update(model.name.as_bytes());
