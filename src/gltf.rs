@@ -205,6 +205,14 @@ pub(crate) fn model_to_gltf(
         "scenes": [{ "nodes": (0..nodes.len()).collect::<Vec<_>>() }],
         "scene": 0
     });
+    if gltf_materials.iter().any(|material| {
+        material
+            .get("extensions")
+            .and_then(|extensions| extensions.get("KHR_materials_unlit"))
+            .is_some()
+    }) {
+        json_value["extensionsUsed"] = json!(["KHR_materials_unlit"]);
+    }
     if include_textures {
         json_value["images"] = json!(images);
         json_value["samplers"] = json!(samplers);
@@ -384,6 +392,9 @@ impl MaterialExport<'_> {
             "pbrMetallicRoughness": pbr,
             "doubleSided": true
         });
+        if material.name == "neon" {
+            material_json["extensions"] = json!({ "KHR_materials_unlit": {} });
+        }
         if let Some(image_index) = normal {
             material_json["normalTexture"] = json!({ "index": image_index });
         }
@@ -630,7 +641,7 @@ mod tests {
         )
         .unwrap();
 
-        let model = ModelAsset {
+        let mut model = ModelAsset {
             name: "Triangle".to_owned(),
             primitives: vec![ModelPrimitive {
                 name: "TrianglePart".to_owned(),
@@ -765,6 +776,28 @@ mod tests {
             no_material_document["meshes"][0]["primitives"][0]["attributes"]
                 .get("TANGENT")
                 .is_none()
+        );
+
+        model.primitives[0].material.name = "neon".to_owned();
+        let neon_buffer_path = root.join("bin").join("neon.bin");
+        let neon_gltf = model_to_gltf(
+            &model,
+            &root.join("download"),
+            &assets_dir,
+            &model_dir,
+            &root,
+            &neon_buffer_path,
+            false,
+        )
+        .unwrap();
+        let neon_document: Value = serde_json::from_slice(&neon_gltf).unwrap();
+        assert_eq!(
+            neon_document["extensionsUsed"],
+            json!(["KHR_materials_unlit"])
+        );
+        assert_eq!(
+            neon_document["materials"][0]["extensions"]["KHR_materials_unlit"],
+            json!({})
         );
 
         fs::remove_dir_all(root).unwrap();
