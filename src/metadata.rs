@@ -212,7 +212,15 @@ fn variant_to_json(value: &Variant) -> Value {
 }
 
 pub(crate) fn property_asset_id(instance: &Instance, property: &str) -> Option<String> {
-    let value = instance.properties.get(&property.into())?;
+    let value = instance.properties.get(&property.into()).or_else(|| {
+        let canonical_property = match property {
+            "TextureID" | "TextureId" => "TextureContent",
+            "ColorMap" => "ColorMapContent",
+            "NormalMap" => "NormalMapContent",
+            _ => return None,
+        };
+        instance.properties.get(&canonical_property.into())
+    })?;
     let uri = match value {
         Variant::Content(content) => content.as_uri(),
         Variant::ContentId(content_id) => Some(content_id.as_str()),
@@ -347,6 +355,7 @@ mod tests {
     use super::*;
     use rbx_dom_weak::InstanceBuilder;
     use rbx_types::Color3uint8;
+    use std::{fs::File, io::BufReader, path::Path};
 
     #[test]
     fn parses_asset_ids_from_roblox_urls() {
@@ -356,6 +365,36 @@ mod tests {
             Some("456".to_owned())
         );
         assert_eq!(parse_asset_id("rbxassetid://not-an-id"), None);
+    }
+
+    #[test]
+    fn resolves_reflection_canonical_texture_properties() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/MESHOLD - log.rbxmx");
+        let dom = rbx_xml::from_reader(
+            BufReader::new(File::open(path).unwrap()),
+            rbx_xml::DecodeOptions::default(),
+        )
+        .unwrap();
+        let mesh_part = dom
+            .descendants()
+            .find(|instance| instance.class.as_str() == "MeshPart")
+            .unwrap();
+        assert_eq!(
+            property_asset_id(mesh_part, "TextureID"),
+            Some("5123577014".to_owned())
+        );
+        let surface_appearance = dom
+            .descendants()
+            .find(|instance| instance.class.as_str() == "SurfaceAppearance")
+            .unwrap();
+        assert_eq!(
+            property_asset_id(surface_appearance, "ColorMap"),
+            Some("5127683646".to_owned())
+        );
+        assert_eq!(
+            property_asset_id(surface_appearance, "NormalMap"),
+            Some("5123581084".to_owned())
+        );
     }
 
     #[test]

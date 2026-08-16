@@ -440,12 +440,13 @@ impl MaterialExport<'_> {
                 format!("{}_normal.png", material.name),
             )
         };
-        let asset_path =
-            asset_id.map(|asset_id| self.download_dir.join(asset_id).join("asset.bin"));
+        let asset_path = if let Some(asset_id) = asset_id {
+            downloaded_image_path(self.download_dir, asset_id)?
+        } else {
+            None
+        };
         let fallback_path = self.materials_dir.join(fallback_name);
-        let source_path = asset_path
-            .filter(|path| path.is_file())
-            .or_else(|| fallback_path.is_file().then_some(fallback_path));
+        let source_path = asset_path.or_else(|| fallback_path.is_file().then_some(fallback_path));
         let Some(source_path) = source_path else {
             return Ok(None);
         };
@@ -473,6 +474,39 @@ impl MaterialExport<'_> {
         self.image_indices.insert(source_path, texture_index);
         Ok(Some(texture_index))
     }
+}
+
+fn downloaded_image_path(download_dir: &Path, asset_id: &str) -> Result<Option<PathBuf>, String> {
+    let asset_dir = download_dir.join(asset_id);
+    let entries = match fs::read_dir(&asset_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "failed to read downloaded texture directory {}: {error}",
+                asset_dir.display()
+            ));
+        }
+    };
+    let mut paths = entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            format!(
+                "failed to inspect downloaded texture directory {}: {error}",
+                asset_dir.display()
+            )
+        })?;
+    paths.retain(|path| path.is_file());
+    paths.sort();
+    for path in paths {
+        let bytes = fs::read(&path)
+            .map_err(|error| format!("failed to read texture {}: {error}", path.display()))?;
+        if image_mime_type(&bytes).is_some() {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 fn stage_asset(
@@ -570,6 +604,88 @@ mod tests {
     use crate::{csg::UnionVertex, model::ModelPrimitive};
     use serde_json::{Value, json};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn uses_downloaded_image_assets_for_material_textures() {
+        let root = std::env::temp_dir().join(format!(
+            "roform-downloaded-texture-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let model_dir = root.join("model");
+        let download_dir = root.join("download");
+        let buffer_path = root.join("bin").join("triangle.bin");
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::create_dir_all(buffer_path.parent().unwrap()).unwrap();
+        let texture_dir = download_dir.join("123");
+        fs::create_dir_all(&texture_dir).unwrap();
+        fs::write(texture_dir.join("asset.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+
+        let model = ModelAsset {
+            name: "Triangle".to_owned(),
+            primitives: vec![ModelPrimitive {
+                name: "TrianglePart".to_owned(),
+                mesh: UnionMesh {
+                    vertices: vec![
+                        UnionVertex {
+                            position: [0.0, 0.0, 0.0],
+                            normal: [0.0, 1.0, 0.0],
+                            tex_coord: [0.0, 0.0],
+                            color: [255; 4],
+                        },
+                        UnionVertex {
+                            position: [1.0, 0.0, 0.0],
+                            normal: [0.0, 1.0, 0.0],
+                            tex_coord: [1.0, 0.0],
+                            color: [255; 4],
+                        },
+                        UnionVertex {
+                            position: [0.0, 1.0, 0.0],
+                            normal: [0.0, 1.0, 0.0],
+                            tex_coord: [0.0, 1.0],
+                            color: [255; 4],
+                        },
+                    ],
+                    indices: vec![0, 1, 2],
+                },
+                matrix: [
+                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+                ],
+                material: ModelMaterial {
+                    name: "plastic".to_owned(),
+                    color: [1.0; 4],
+                    base_color_asset: Some("123".to_owned()),
+                    normal_asset: None,
+                },
+                extras: Value::Null,
+            }],
+            extras: Value::Null,
+            warnings: Vec::new(),
+            asset_ids: vec!["123".to_owned()],
+        };
+
+        let gltf = model_to_gltf(
+            &model,
+            &download_dir,
+            &root.join("materials"),
+            &model_dir,
+            &root,
+            &buffer_path,
+            true,
+        )
+        .unwrap();
+        let document: Value = serde_json::from_slice(&gltf).unwrap();
+        assert_eq!(document["images"][0]["uri"], "../download/123/asset.png");
+        assert_eq!(
+            document["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"]["index"],
+            0
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn packs_external_buffer_and_image_into_glb() {

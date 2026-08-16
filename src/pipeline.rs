@@ -654,8 +654,25 @@ fn model_dependency_paths(
     let mut paths = HashSet::new();
     for asset_id in &model.asset_ids {
         let asset_dir = download_dir.join(asset_id);
-        paths.insert(asset_dir.join("asset.bin"));
-        paths.insert(asset_dir.join("asset.rbxm"));
+        for filename in [
+            "asset.bin",
+            "asset.png",
+            "asset.jpg",
+            "asset.jpeg",
+            "asset.webp",
+            "asset.rbxm",
+            "asset.rbxmx",
+        ] {
+            paths.insert(asset_dir.join(filename));
+        }
+        if let Ok(entries) = fs::read_dir(&asset_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    paths.insert(path);
+                }
+            }
+        }
     }
     if includes_materials {
         for primitive in &model.primitives {
