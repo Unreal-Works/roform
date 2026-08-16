@@ -1,6 +1,6 @@
 {
   "name": "@unrealworks/roform-darwin-x64",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "macOS x64 binary for roform",
   "license": "MIT",
   "repository": {

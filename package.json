@@ -1,6 +1,6 @@
 {
   "name": "@unrealworks/roform",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Parse Roblox files into render-agnostic glTF",
   "license": "MIT",
   "repository": {
@@ -22,12 +22,12 @@
     "access": "public"
   },
   "optionalDependencies": {
-    "@unrealworks/roform-darwin-arm64": "0.0.0",
-    "@unrealworks/roform-darwin-x64": "0.0.0",
-    "@unrealworks/roform-linux-arm64": "0.0.0",
-    "@unrealworks/roform-linux-x64": "0.0.0",
-    "@unrealworks/roform-win32-arm64": "0.0.0",
-    "@unrealworks/roform-win32-x64": "0.0.0"
+    "@unrealworks/roform-darwin-arm64": "0.1.0",
+    "@unrealworks/roform-darwin-x64": "0.1.0",
+    "@unrealworks/roform-linux-arm64": "0.1.0",
+    "@unrealworks/roform-linux-x64": "0.1.0",
+    "@unrealworks/roform-win32-arm64": "0.1.0",
+    "@unrealworks/roform-win32-x64": "0.1.0"
   },
   "scripts": {
     "build": "cargo build --release",
