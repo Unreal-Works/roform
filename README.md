@@ -14,7 +14,7 @@ Export a directory and also create GLB files:
 roform path/to/place.rbxlx \
   --out-dir build/roform \
   --materials-dir assets/material \
-  --glb
+  --compile mesh,model,glb
 ```
 
 > [!WARNING]
@@ -95,12 +95,12 @@ For default `--out-dir roform`, the pipeline creates the following directory str
 roform/
 ├── download/                 # Downloaded Roblox assets
 ├── mesh/                     # Decoded mesh cache
-├── model/                    # glTF documents
+├── model/                    # glTF documents when model compilation is selected
 │   ├── M<hash>.gltf          # glTF with materials if --materials-dir is used
 │   ├── <hash>.gltf           # glTF without materials when --materials-dir is omitted
 │   └── manifest.json         # Source and output mapping
 ├── bin/                      # glTF binary buffers
-└── glb/                      # Created only when --glb is used
+└── glb/                      # Created only when glb compilation is selected
 ```
 
 ## Hand-writing Your Rendering Implementation

@@ -1,7 +1,32 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use mhif::{DownloadOptions, download_assets, extract_asset_ids_cached};
 use roform::{ModelExportOptions, export_glbs, export_models};
 use std::{path::PathBuf, process::ExitCode};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum CompileStage {
+    Mesh,
+    Model,
+    Glb,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CompilePlan {
+    mesh: bool,
+    model: bool,
+    glb: bool,
+}
+
+fn compile_plan(stages: &[CompileStage], no_compile: bool) -> CompilePlan {
+    if no_compile {
+        return CompilePlan::default();
+    }
+
+    let glb = stages.contains(&CompileStage::Glb);
+    let model = stages.contains(&CompileStage::Model) || glb;
+    let mesh = stages.contains(&CompileStage::Mesh) || model;
+    CompilePlan { mesh, model, glb }
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -18,12 +43,25 @@ struct Cli {
     out_dir: PathBuf,
     #[arg(
         long,
+        value_delimiter = ',',
+        value_name = "STAGE[,STAGE...]",
+        default_values = ["mesh", "model"],
+        conflicts_with = "no_compile",
+        help = "Stages to compile: mesh, model, or glb (default: mesh,model)"
+    )]
+    compile: Vec<CompileStage>,
+    #[arg(
+        long,
+        conflicts_with = "compile",
+        help = "Skip mesh, model, and GLB compilation"
+    )]
+    no_compile: bool,
+    #[arg(
+        long,
         value_name = "DIRECTORY",
         help = "Directory containing fallback material images; enables materials"
     )]
     materials_dir: Option<PathBuf>,
-    #[arg(long, help = "Also package each exported GLTF as a GLB file")]
-    glb: bool,
     #[arg(
         long,
         help = "Ignore cached model outputs and re-export GLTF and GLB files"
@@ -49,8 +87,8 @@ fn main() -> ExitCode {
     match run(
         cli.input,
         cli.out_dir,
+        compile_plan(&cli.compile, cli.no_compile),
         cli.materials_dir,
-        cli.glb,
         cli.recompile,
         cli.studs_per_tile,
     ) {
@@ -65,8 +103,8 @@ fn main() -> ExitCode {
 fn run(
     input: PathBuf,
     out_dir: PathBuf,
+    compile: CompilePlan,
     materials_dir: Option<PathBuf>,
-    glb: bool,
     recompile: bool,
     studs_per_tile: f32,
 ) -> Result<(), String> {
@@ -97,34 +135,52 @@ fn run(
         download_start_time.elapsed().as_secs_f64()
     );
 
-    let model_start_time = std::time::Instant::now();
-    let model_report = export_models(
-        &input,
-        &download_out_dir,
-        &out_dir.join("mesh"),
-        &materials_dir,
-        &out_dir.join("model"),
-        ModelExportOptions {
-            studs_per_tile,
-            includes_materials,
-            recompile,
-        },
-    )?;
-    for failure in &model_report.failed {
-        eprintln!("failed model {}: {}", failure.source, failure.error);
-    }
-    println!(
-        "model: exported {}, reused {}, failed {} -> {} in {:.2}s",
-        model_report.exported,
-        model_report.cached,
-        model_report.failed.len(),
-        model_report.output_directory.display(),
-        model_start_time.elapsed().as_secs_f64()
-    );
+    let model_report = if compile.mesh {
+        let model_start_time = std::time::Instant::now();
+        let model_report = export_models(
+            &input,
+            &download_out_dir,
+            &out_dir.join("mesh"),
+            &materials_dir,
+            &out_dir.join("model"),
+            ModelExportOptions {
+                studs_per_tile,
+                includes_materials,
+                compile_models: compile.model,
+                recompile,
+            },
+        )?;
+        for failure in &model_report.failed {
+            let stage = if compile.model { "model" } else { "mesh" };
+            eprintln!("failed {stage} {}: {}", failure.source, failure.error);
+        }
+        if compile.model {
+            println!(
+                "model: exported {}, reused {}, failed {} -> {} in {:.2}s",
+                model_report.exported,
+                model_report.cached,
+                model_report.failed.len(),
+                model_report.output_directory.display(),
+                model_start_time.elapsed().as_secs_f64()
+            );
+        } else {
+            println!(
+                "mesh: decoded -> {} in {:.2}s",
+                out_dir.join("mesh").display(),
+                model_start_time.elapsed().as_secs_f64()
+            );
+        }
+        Some(model_report)
+    } else {
+        None
+    };
 
-    if glb {
+    if compile.glb {
         let glb_start_time = std::time::Instant::now();
-        let glb_report = export_glbs(&model_report.models, &out_dir.join("glb"), recompile)?;
+        let models = model_report
+            .as_ref()
+            .ok_or_else(|| "GLB compilation requires model compilation".to_owned())?;
+        let glb_report = export_glbs(&models.models, &out_dir.join("glb"), recompile)?;
         println!(
             "glb: exported {}, reused {}, failed {} -> {} in {:.2}s",
             glb_report.exported,
@@ -163,5 +219,67 @@ mod tests {
 
         let recompile_cli = Cli::try_parse_from(["roform", "input.rbxmx", "--recompile"]).unwrap();
         assert!(recompile_cli.recompile);
+
+        let default_cli = Cli::try_parse_from(["roform", "input.rbxmx"]).unwrap();
+        assert_eq!(
+            compile_plan(&default_cli.compile, default_cli.no_compile),
+            CompilePlan {
+                mesh: true,
+                model: true,
+                glb: false,
+            }
+        );
+
+        let mesh_cli = Cli::try_parse_from(["roform", "input.rbxmx", "--compile", "mesh"]).unwrap();
+        assert_eq!(
+            compile_plan(&mesh_cli.compile, mesh_cli.no_compile),
+            CompilePlan {
+                mesh: true,
+                model: false,
+                glb: false,
+            }
+        );
+        assert_eq!(
+            compile_plan(&[CompileStage::Model], false),
+            CompilePlan {
+                mesh: true,
+                model: true,
+                glb: false,
+            }
+        );
+        assert_eq!(
+            compile_plan(&[CompileStage::Glb], false),
+            CompilePlan {
+                mesh: true,
+                model: true,
+                glb: true,
+            }
+        );
+
+        let all_cli =
+            Cli::try_parse_from(["roform", "input.rbxmx", "--compile", "mesh,model,glb"]).unwrap();
+        assert_eq!(
+            compile_plan(&all_cli.compile, all_cli.no_compile),
+            CompilePlan {
+                mesh: true,
+                model: true,
+                glb: true,
+            }
+        );
+
+        let no_compile_cli =
+            Cli::try_parse_from(["roform", "input.rbxmx", "--no-compile"]).unwrap();
+        assert_eq!(
+            compile_plan(&no_compile_cli.compile, no_compile_cli.no_compile),
+            CompilePlan::default()
+        );
+        assert!(Cli::try_parse_from(["roform", "input.rbxmx", "--compile", "unknown"]).is_err());
+        assert!(
+            Cli::try_parse_from(["roform", "input.rbxmx", "--compile", "mesh", "--no-compile"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["roform", "input.rbxmx", "--model"]).is_err());
+        assert!(Cli::try_parse_from(["roform", "input.rbxmx", "--no-model"]).is_err());
+        assert!(Cli::try_parse_from(["roform", "input.rbxmx", "--glb"]).is_err());
     }
 }

@@ -5,7 +5,8 @@ Please update this document after any relevant changes.
 ## Asset Pipeline
 
 - The CLI stages assets as `download`, decoded `mesh`, and hash-keyed `model` GLTF output. Decoded meshes are cached below `roform/mesh/<blake3-of-source-payload>.bin` in the versioned `ROFMESH1` format, with dependency content hashes cached in `roform/mesh/fingerprint.json`. Without `--materials-dir`, model GLTF files are written below `roform/model/<hash>.gltf`; when `--materials-dir` is provided, they use `roform/model/M<hash>.gltf`. Their external buffers use the matching stem in `roform/bin/`, and source/model names are recorded in `roform/model/manifest.json`.
-- Passing `--glb` packages each successful model GLTF, including its buffer and textures, below `roform/glb/<hash>.glb` or `roform/glb/M<hash>.glb` after GLTF export.
+- Compilation stages default to `mesh,model`; `--compile` accepts comma-separated `mesh`, `model`, and `glb` stages, with model and GLB stages including their required earlier stages. `--no-compile` skips mesh, model, and GLB compilation while downloads still run.
+- Including `glb` in `--compile` packages each successful model GLTF, including its buffer and textures, below `roform/glb/<hash>.glb` or `roform/glb/M<hash>.glb` after GLTF export.
 - Passing `--recompile` bypasses cached model and GLB outputs while retaining cached downloads and decoded meshes.
 - Materials are enabled only when `--materials-dir` is provided. Without it, exports retain part colors and transparency but omit material images, samplers, and texture assignments.
 - Imported `MeshPart`, `UnionOperation`, and `IntersectOperation` instances recolor decoded geometry from `Color` only when `UsePartColor` is enabled; enabled part color clears authored RGB vertex tint while preserving vertex alpha, and disabled part color leaves decoded mesh colors intact. CSG operations default to disabled, while mesh parts retain their tint when the legacy flag is absent.

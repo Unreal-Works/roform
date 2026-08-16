@@ -109,6 +109,10 @@ pub struct ModelExportOptions {
     /// Whether material definitions and available material textures are
     /// included in the exported GLTF. The default is `true`.
     pub includes_materials: bool,
+    /// Whether decoded meshes should also be compiled into model GLTF files.
+    /// Meshes are decoded and cached even when this is `false`. The default is
+    /// `true`.
+    pub compile_models: bool,
     /// Whether existing model GLTF files should be ignored and regenerated.
     /// Cached downloads and decoded meshes are still reusable. The default is
     /// `false`.
@@ -120,6 +124,7 @@ impl Default for ModelExportOptions {
         Self {
             studs_per_tile: 1.0,
             includes_materials: true,
+            compile_models: true,
             recompile: false,
         }
     }
@@ -142,7 +147,8 @@ impl ModelExportOptions {
 /// contain downloaded Roblox assets referenced by the input, and `materials_dir`
 /// may contain fallback material images. `mesh_dir` stores decoded mesh cache
 /// files and `output_dir` stores model GLTF files, external buffers, and the
-/// model manifest.
+/// model manifest when `options.compile_models` is `true`. Meshes are still
+/// decoded when model compilation is disabled.
 ///
 /// A successful result can still contain entries in [`ModelReport::failed`].
 /// Per-source and per-model failures are reported there while processing
@@ -162,6 +168,7 @@ pub fn export_models(
     let ModelExportOptions {
         studs_per_tile,
         includes_materials,
+        compile_models,
         recompile,
     } = options;
     let download_dir = absolute_path(download_dir)?;
@@ -174,17 +181,49 @@ pub fn export_models(
             mesh_dir.display()
         )
     })?;
-    fs::create_dir_all(&output_dir).map_err(|error| {
-        format!(
-            "failed to create model output directory {}: {error}",
-            output_dir.display()
-        )
-    })?;
+    if compile_models {
+        fs::create_dir_all(&output_dir).map_err(|error| {
+            format!(
+                "failed to create model output directory {}: {error}",
+                output_dir.display()
+            )
+        })?;
+    }
 
     let source_files = model::source_files(input)?
         .into_iter()
         .map(|path| absolute_path(&path))
         .collect::<Result<Vec<_>, _>>()?;
+    let mut report = ModelReport {
+        exported: 0,
+        cached: 0,
+        failed: Vec::new(),
+        models: Vec::new(),
+        output_directory: output_dir.to_owned(),
+    };
+    if !compile_models {
+        for source_path in source_files {
+            match model::parse_models(&source_path, &download_dir, &mesh_dir, studs_per_tile) {
+                Ok(models) => {
+                    for model_asset in models {
+                        for warning in &model_asset.warnings {
+                            eprintln!(
+                                "warning model {} in {}: {}",
+                                model_asset.name,
+                                source_path.display(),
+                                warning
+                            );
+                        }
+                    }
+                }
+                Err(error) => report.failed.push(ModelFailure {
+                    source: source_path.display().to_string(),
+                    error,
+                }),
+            }
+        }
+        return Ok(report);
+    }
     let source_entries = source_manifest_entries(&source_files).unwrap_or_default();
     let source_hashes = source_entries
         .iter()
@@ -226,14 +265,6 @@ pub fn export_models(
         .as_ref()
         .map(|manifest| manifest.dependencies.clone())
         .unwrap_or_default();
-    let mut report = ModelReport {
-        exported: 0,
-        cached: 0,
-        failed: Vec::new(),
-        models: Vec::new(),
-        output_directory: output_dir.to_owned(),
-    };
-
     for source_path in source_files {
         let source = cache_path(&source_path);
         if let Some(source_hash) = source_hashes.get(&source)
@@ -787,6 +818,62 @@ mod tests {
     }
 
     #[test]
+    fn skips_model_outputs_but_keeps_mesh_stage() {
+        let root = std::env::temp_dir().join(format!(
+            "roform-pipeline-no-model-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let input = root.join("input.rbxmx");
+        let download_dir = root.join("download");
+        let mesh_payload =
+            b"version 1.00\r\n1\r\n[0,0,0][0,1,0][0,0,0][1,0,0][0,1,0][1,0,0][0,0,1][0,1,0][0,1,1]\r\n";
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(download_dir.join("71515755768314")).unwrap();
+        fs::write(
+            &input,
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/fixtures/MESH7 - hamster.rbxmx"
+            )),
+        )
+        .unwrap();
+        fs::write(
+            download_dir.join("71515755768314").join("asset.bin"),
+            mesh_payload,
+        )
+        .unwrap();
+
+        let report = export_models(
+            &input,
+            &download_dir,
+            &root.join("mesh"),
+            &root.join("assets"),
+            &root.join("model"),
+            ModelExportOptions {
+                compile_models: false,
+                ..ModelExportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(report.models.is_empty());
+        assert!(report.failed.is_empty());
+        assert!(root.join("mesh").is_dir());
+        assert!(
+            root.join("mesh")
+                .join(format!("{}.bin", blake3::hash(mesh_payload).to_hex()))
+                .is_file()
+        );
+        assert!(!root.join("model").exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn reuses_a_source_independently_of_other_manifest_sources() {
         let root = std::env::temp_dir().join(format!(
             "roform-pipeline-{}-{}",
@@ -879,6 +966,7 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
+                compile_models: true,
                 recompile: false,
             },
         )
@@ -907,6 +995,7 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
+                compile_models: true,
                 recompile: false,
             },
         )
@@ -932,6 +1021,7 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
+                compile_models: true,
                 recompile: false,
             },
         )
@@ -948,6 +1038,7 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
+                compile_models: true,
                 recompile: false,
             },
         )
@@ -964,6 +1055,7 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
+                compile_models: true,
                 recompile: false,
             },
         )
@@ -980,6 +1072,7 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
+                compile_models: true,
                 recompile: true,
             },
         )
