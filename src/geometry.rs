@@ -162,7 +162,7 @@ fn cylinder_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
         let following = [next_angle.cos(), next_angle.sin()];
 
         // +90 degrees around Z: (x, y, z) -> (-y, x, z)
-        add_face_with_uvs(
+        add_face_with_reversed_winding(
             &mut mesh,
             [
                 [half_height, radius * current[0], radius * current[1]],
@@ -246,25 +246,7 @@ fn sphere_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
                 sphere_point(upper, next_angle, radii),
                 sphere_point(upper, angle, radii),
             ];
-            let normals = points.map(|point| {
-                normalize([
-                    if radii[0] == 0.0 {
-                        0.0
-                    } else {
-                        point[0] / radii[0]
-                    },
-                    if radii[1] == 0.0 {
-                        0.0
-                    } else {
-                        point[1] / radii[1]
-                    },
-                    if radii[2] == 0.0 {
-                        0.0
-                    } else {
-                        point[2] / radii[2]
-                    },
-                ])
-            });
+            let normals = points.map(|point| ellipsoid_normal(point, radii));
             let base = mesh.vertices.len() as u32;
             for ((point, normal), (latitude, longitude)) in points.into_iter().zip(normals).zip([
                 (lower, angle),
@@ -285,7 +267,7 @@ fn sphere_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
                 });
             }
             mesh.indices
-                .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+                .extend([base, base + 3, base + 2, base, base + 2, base + 1]);
         }
     }
     mesh
@@ -388,6 +370,25 @@ fn add_face_with_uvs(
     }
     mesh.indices
         .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+fn add_face_with_reversed_winding(
+    mesh: &mut UnionMesh,
+    positions: [[f32; 3]; 4],
+    tex_coords: [[f32; 2]; 4],
+    normal: [f32; 3],
+) {
+    let base = mesh.vertices.len() as u32;
+    for (position, tex_coord) in positions.into_iter().zip(tex_coords) {
+        mesh.vertices.push(UnionVertex {
+            position,
+            normal,
+            tex_coord,
+            color: [255; 4],
+        });
+    }
+    mesh.indices
+        .extend([base, base + 3, base + 2, base, base + 2, base + 1]);
 }
 
 fn add_triangle_tiled(mesh: &mut UnionMesh, positions: [[f32; 3]; 3], studs_per_tile: f32) {
@@ -524,6 +525,22 @@ fn sphere_point(latitude: f32, longitude: f32, radii: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+fn ellipsoid_normal(point: [f32; 3], radii: [f32; 3]) -> [f32; 3] {
+    normalize([
+        normal_component(point[0], radii[0]),
+        normal_component(point[1], radii[1]),
+        normal_component(point[2], radii[2]),
+    ])
+}
+
+fn normal_component(coordinate: f32, radius: f32) -> f32 {
+    if radius <= f32::EPSILON {
+        0.0
+    } else {
+        coordinate / (radius * radius)
+    }
+}
+
 fn normalize(value: [f32; 3]) -> [f32; 3] {
     let length = (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt();
     if length <= f32::EPSILON {
@@ -568,6 +585,37 @@ mod tests {
         let angular_step = std::f32::consts::TAU / CYLINDER_SEGMENTS as f32;
         assert_close(mesh.vertices[10].normal[1], angular_step.cos());
         assert_close(mesh.vertices[10].normal[2], angular_step.sin());
+    }
+
+    #[test]
+    fn curved_primitive_winding_matches_outward_normals() {
+        for mesh in [
+            cylinder_mesh(Vector3::new(10.0, 4.0, 4.0), 2.0),
+            sphere_mesh(Vector3::new(4.0, 6.0, 8.0), 2.0),
+        ] {
+            assert!(mesh.indices.chunks_exact(3).all(|triangle| {
+                let first = mesh.vertices[triangle[0] as usize].position;
+                let second = mesh.vertices[triangle[1] as usize].position;
+                let third = mesh.vertices[triangle[2] as usize].position;
+                let face = cross(subtract(second, first), subtract(third, first));
+                let area_squared = dot(face, face);
+                area_squared <= f32::EPSILON
+                    || dot(face, mesh.vertices[triangle[0] as usize].normal) > f32::EPSILON
+            }));
+        }
+    }
+
+    #[test]
+    fn sphere_normals_follow_ellipsoid_surface() {
+        let mesh = sphere_mesh(Vector3::new(4.0, 6.0, 8.0), 2.0);
+        let longitude = SPHERE_SEGMENTS / 8;
+        let vertex = &mesh.vertices[(SPHERE_RINGS / 2 * SPHERE_SEGMENTS + longitude) * 4];
+        let inverse_sqrt_five = 5.0f32.sqrt().recip();
+
+        assert_vector_close(
+            vertex.normal,
+            [2.0 * inverse_sqrt_five, 0.0, inverse_sqrt_five],
+        );
     }
 
     #[test]
