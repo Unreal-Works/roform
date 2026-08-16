@@ -1,6 +1,6 @@
 # roform
 
-`roform` converts Roblox model and place files into render-agnostic GLTF.
+`roform` converts Roblox model and place files into render-agnostic [GLTF](https://en.wikipedia.org/wiki/GlTF).
 
 ## CLI
 
@@ -16,6 +16,9 @@ roform path/to/place.rbxlx \
   --materials-dir assets/material \
   --glb
 ```
+
+> [!WARNING]
+> Roblox does not permit redistribution of Creator Store assets outside of Roblox. Please ensure that you have the right to redistribute any assets you export with `roform`.
 
 ## Output
 
