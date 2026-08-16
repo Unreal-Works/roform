@@ -23,13 +23,26 @@ pub(crate) fn material_for(dom: &WeakDom, instance: &Instance) -> ModelMaterial 
         .and_then(float_value)
         .unwrap_or(0.0)
         .clamp(0.0, 1.0);
+    let applies_part_color = use_part_color(instance);
 
     let mut material = ModelMaterial {
         name: material_name,
         color: [
-            color[0] as f32 / 255.0,
-            color[1] as f32 / 255.0,
-            color[2] as f32 / 255.0,
+            if applies_part_color {
+                color[0] as f32 / 255.0
+            } else {
+                1.0
+            },
+            if applies_part_color {
+                color[1] as f32 / 255.0
+            } else {
+                1.0
+            },
+            if applies_part_color {
+                color[2] as f32 / 255.0
+            } else {
+                1.0
+            },
             1.0 - transparency,
         ],
         base_color_asset: None,
@@ -44,6 +57,14 @@ pub(crate) fn material_for(dom: &WeakDom, instance: &Instance) -> ModelMaterial 
         material.normal_asset = property_asset_id(surface_appearance, "NormalMap");
     }
     material
+}
+
+fn use_part_color(instance: &Instance) -> bool {
+    match instance.class.as_str() {
+        "UnionOperation" => property_bool(instance, "UsePartColor").unwrap_or(false),
+        "MeshPart" => property_bool(instance, "UsePartColor").unwrap_or(true),
+        _ => true,
+    }
 }
 
 pub(crate) fn direct_child(dom: &WeakDom, instance: &Instance, class: &str) -> Option<Ref> {
@@ -225,6 +246,13 @@ pub(crate) fn property_vector3(instance: &Instance, property: &str) -> Option<Ve
     }
 }
 
+fn property_bool(instance: &Instance, property: &str) -> Option<bool> {
+    match instance.properties.get(&property.into())? {
+        Variant::Bool(value) => Some(*value),
+        _ => None,
+    }
+}
+
 fn color_value(value: &Variant) -> Option<[u8; 3]> {
     match value {
         Variant::Color3uint8(color) => Some([color.r, color.g, color.b]),
@@ -311,6 +339,7 @@ fn material_name(value: u32) -> String {
 mod tests {
     use super::*;
     use rbx_dom_weak::InstanceBuilder;
+    use rbx_types::Color3uint8;
 
     #[test]
     fn parses_asset_ids_from_roblox_urls() {
@@ -328,6 +357,51 @@ mod tests {
             let dom = WeakDom::new(InstanceBuilder::new(class));
             assert!(is_geometry(dom.root()), "{class} should be geometry");
         }
+    }
+
+    #[test]
+    fn only_applies_part_color_when_enabled_for_imported_geometry() {
+        for class in ["MeshPart", "UnionOperation"] {
+            let dom = WeakDom::new(
+                InstanceBuilder::new(class)
+                    .with_property("Color", Color3uint8::new(64, 128, 192))
+                    .with_property("Transparency", 0.25f32)
+                    .with_property("UsePartColor", false),
+            );
+            assert_eq!(
+                material_for(&dom, dom.root()).color,
+                [1.0, 1.0, 1.0, 0.75],
+                "{class} should retain its source colors when UsePartColor is disabled"
+            );
+
+            let dom = WeakDom::new(
+                InstanceBuilder::new(class)
+                    .with_property("Color", Color3uint8::new(64, 128, 192))
+                    .with_property("UsePartColor", true),
+            );
+            assert_eq!(
+                material_for(&dom, dom.root()).color,
+                [64.0 / 255.0, 128.0 / 255.0, 192.0 / 255.0, 1.0],
+                "{class} should apply its part color when UsePartColor is enabled"
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_mesh_part_tint_when_use_part_color_is_not_serialized() {
+        let dom = WeakDom::new(
+            InstanceBuilder::new("MeshPart").with_property("Color", Color3uint8::new(64, 128, 192)),
+        );
+        assert_eq!(
+            material_for(&dom, dom.root()).color,
+            [64.0 / 255.0, 128.0 / 255.0, 192.0 / 255.0, 1.0]
+        );
+
+        let dom = WeakDom::new(
+            InstanceBuilder::new("UnionOperation")
+                .with_property("Color", Color3uint8::new(64, 128, 192)),
+        );
+        assert_eq!(material_for(&dom, dom.root()).color, [1.0, 1.0, 1.0, 1.0]);
     }
 
     #[test]
