@@ -8,7 +8,7 @@ Please update this document after any relevant changes.
 - Passing `--glb` packages each successful model GLTF, including its buffer and textures, below `roform/glb/<hash>.glb` or `roform/glb/M<hash>.glb` after GLTF export.
 - Passing `--recompile` bypasses cached model and GLB outputs while retaining cached downloads and decoded meshes.
 - Materials are enabled only when `--materials-dir` is provided. Without it, exports retain part colors and transparency but omit material images, samplers, and texture assignments.
-- Imported `MeshPart` and `UnionOperation` instances apply an explicit `UsePartColor` tint only when enabled; disabled part color leaves decoded mesh colors intact while preserving transparency and textures. Union operations default to disabled, while mesh parts retain their tint when the legacy flag is absent.
+- Imported `MeshPart`, `UnionOperation`, and `IntersectOperation` instances recolor decoded geometry from `Color` only when `UsePartColor` is enabled; enabled part color clears authored RGB vertex tint while preserving vertex alpha, and disabled part color leaves decoded mesh colors intact. CSG operations default to disabled, while mesh parts retain their tint when the legacy flag is absent.
 - MeshParts without an explicit `TextureID` or `SurfaceAppearance.ColorMap` use model-space physical UV projection for fallback material textures; explicitly textured MeshParts preserve their authored mesh UVs.
 - Roblox Neon materials use the GLTF `KHR_materials_unlit` extension so they render without lighting or normal-based shading; the extension is advertised only when a model contains Neon.
 - Model export embeds valid images directly from `<materials-dir>/` as data URIs, using Roblox Material enum values from the official enum documentation when mapping material names. The generated model manifest records absolute source and output paths.
@@ -18,7 +18,7 @@ Please update this document after any relevant changes.
 - Cache path keys use normalized separators, and model fingerprints use stable source, option, and dependency inputs rather than serialized parsed-model ordering.
 - `roform/mesh/fingerprint.json` caches content hashes for referenced dependency files; it is cache state and must not be included in its own dependency fingerprint.
 - Generated flat-primitive UVs use model-space-anchored, face-normal-derived physical surface projections divided by `--studs-per-tile`; this keeps texture axes and phase consistent across translated or rotated parts and wedges. Cylinder sides follow circumference, spheres follow surface arc lengths, exported textures reference an explicit GLTF `REPEAT` sampler, and normal-mapped primitives include generated tangent space.
-- `Part`, `WedgePart`, and `CornerWedgePart` instances use generated primitive geometry; cylinders use 64 radial segments, while spheres use 128 longitude segments and 64 latitude bands so their diagonal facets are no larger than cylinder facets. Curved primitive triangle winding matches outward normals, and ball normals use the ellipsoid surface normal for non-uniform sizes. Legacy `Part.Shape` wedge values use the same generators.
+- `Part`, `WedgePart`, and `CornerWedgePart` instances use generated primitive geometry; cylinders use 64 radial segments, while spheres use 128 longitude segments and 64 latitude bands with a shared seam-aware indexed grid so their diagonal facets are no larger than cylinder facets. GLTF uses 16-bit indices when a primitive fits within the unsigned-short range. Curved primitive triangle winding matches outward normals, and ball normals use the ellipsoid surface normal for non-uniform sizes. Legacy `Part.Shape` wedge values use the same generators.
 
 ## Module Boundaries
 
@@ -38,7 +38,7 @@ Please update this document after any relevant changes.
 2. If you see something like <token name="RightSurface">3</token> in a Roblox XML file, this is the enum value. Search its actual semantic meaning in `https://create.roblox.com/docs/reference/engine/enums/*`. Do not guess the meaning of enum values.
 3. `rbx_dom_weak::Instance::properties` is keyed by `Ustr`; convert string property names before calling `get`.
 4. Roblox XML may serialize `MeshId` as `<Content name="MeshId">`, while `rbx_xml` exposes the canonical property as `MeshContent`.
-5. Downloaded union `.rbxm` packages store geometry in `PartOperationAsset.MeshData` as a `BinaryString`; raw mesh downloads use `asset.bin`.
-6. Imported `MeshPart` and `UnionOperation` geometry is scaled by `size / InitialSize`; when `InitialSize` is absent, use decoded mesh bounds as the source size.
+5. Downloaded CSG operation `.rbxm` packages store geometry in `PartOperationAsset.MeshData` as a `BinaryString`; raw mesh downloads use `asset.bin`.
+6. Imported `MeshPart`, `UnionOperation`, and `IntersectOperation` geometry is scaled by `size / InitialSize`; when `InitialSize` is absent, use decoded mesh bounds as the source size.
 7. Reflection-enabled Roblox XML canonicalizes the `Color3uint8` XML property to the DOM key `Color`; retain the raw key as a fallback for no-reflection input.
 8. Generated primitive mesh topology and normals are part of the model export format; bump `MODEL_FORMAT_VERSION` when changing them so cached GLTF files are regenerated.

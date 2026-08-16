@@ -10,7 +10,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-const MODEL_FORMAT_VERSION: u32 = 2;
+const MODEL_FORMAT_VERSION: u32 = 1;
 const MISSING_DEPENDENCY_HASH: &str = "<missing>";
 
 /// The result of exporting the models found in an input path.

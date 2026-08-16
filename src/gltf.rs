@@ -98,8 +98,23 @@ pub(crate) fn model_to_gltf(
 
         pad_to_four(&mut binary, 0);
         let index_offset = binary.len();
-        for index in &primitive.mesh.indices {
-            binary.extend_from_slice(&index.to_le_bytes());
+        let use_unsigned_short_indices = primitive
+            .mesh
+            .indices
+            .iter()
+            .all(|index| *index <= u16::MAX as u32);
+        if use_unsigned_short_indices {
+            for index in &primitive.mesh.indices {
+                binary.extend_from_slice(
+                    &u16::try_from(*index)
+                        .map_err(|_| "mesh index does not fit in an unsigned short".to_owned())?
+                        .to_le_bytes(),
+                );
+            }
+        } else {
+            for index in &primitive.mesh.indices {
+                binary.extend_from_slice(&index.to_le_bytes());
+            }
         }
         let index_length = binary.len() - index_offset;
         buffer_views.push(json!({
@@ -109,6 +124,7 @@ pub(crate) fn model_to_gltf(
             "target": 34963
         }));
         let index_view = buffer_views.len() - 1;
+        pad_to_four(&mut binary, 0);
         let (min_position, max_position) = position_bounds(&primitive.mesh);
 
         let position_accessor = accessors.len();
@@ -159,7 +175,7 @@ pub(crate) fn model_to_gltf(
         let index_accessor = accessors.len();
         accessors.push(json!({
             "bufferView": index_view,
-            "componentType": 5125,
+            "componentType": if use_unsigned_short_indices { 5123 } else { 5125 },
             "count": primitive.mesh.indices.len(),
             "type": "SCALAR"
         }));
@@ -720,6 +736,10 @@ mod tests {
             document["buffers"][0]["byteLength"].as_u64(),
             Some(fs::metadata(&buffer_path).unwrap().len())
         );
+        let index_accessor = document["meshes"][0]["primitives"][0]["indices"]
+            .as_u64()
+            .unwrap() as usize;
+        assert_eq!(document["accessors"][index_accessor]["componentType"], 5123);
         assert_eq!(document["extras"]["roblox"]["className"], "Model");
         assert_eq!(
             document["extras"]["roblox"]["properties"]["PrimaryPart"]["Ref"],
@@ -733,7 +753,7 @@ mod tests {
             document["meshes"][0]["extras"]["roblox"]["properties"]["Anchored"],
             true
         );
-        assert_eq!(fs::read(&buffer_path).unwrap().len(), 168);
+        assert_eq!(fs::read(&buffer_path).unwrap().len(), 164);
 
         let no_material_buffer_path = root.join("bin").join("triangle-nm.bin");
         let no_material_gltf = model_to_gltf(

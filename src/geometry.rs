@@ -219,55 +219,39 @@ fn cylinder_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
 fn sphere_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
     let rings = SPHERE_RINGS;
     let segments = SPHERE_SEGMENTS;
+    let columns = segments + 1;
     let radii = [size.x.abs() * 0.5, size.y.abs() * 0.5, size.z.abs() * 0.5];
     let tile = studs_per_tile.max(f32::EPSILON);
     let equatorial_radius = (radii[0] + radii[2]) * 0.5;
     let meridian_radius = (radii[0] + radii[1] + radii[2]) / 3.0;
     let mut mesh = UnionMesh {
-        vertices: Vec::with_capacity(rings * segments * 4),
+        vertices: Vec::with_capacity((rings + 1) * columns),
         indices: Vec::with_capacity(rings * segments * 6),
     };
-    for ring in 0..rings {
-        let lower =
+    for ring in 0..=rings {
+        let latitude =
             -std::f32::consts::FRAC_PI_2 + ring as f32 / rings as f32 * std::f32::consts::PI;
-        let upper =
-            -std::f32::consts::FRAC_PI_2 + (ring + 1) as f32 / rings as f32 * std::f32::consts::PI;
+        for segment in 0..=segments {
+            let longitude = segment as f32 / segments as f32 * std::f32::consts::TAU;
+            let point = sphere_point(latitude, longitude, radii);
+            mesh.vertices.push(UnionVertex {
+                position: point,
+                normal: ellipsoid_normal(point, radii),
+                tex_coord: [
+                    longitude / std::f32::consts::TAU * (std::f32::consts::TAU * equatorial_radius)
+                        / tile,
+                    (latitude + std::f32::consts::FRAC_PI_2) * meridian_radius / tile,
+                ],
+                color: [255; 4],
+            });
+        }
+    }
+    for ring in 0..rings {
         for segment in 0..segments {
-            let next = (segment + 1) % segments;
-            let angle = segment as f32 / segments as f32 * std::f32::consts::TAU;
-            let next_angle = if next == 0 {
-                std::f32::consts::TAU
-            } else {
-                next as f32 / segments as f32 * std::f32::consts::TAU
-            };
-            let points = [
-                sphere_point(lower, angle, radii),
-                sphere_point(lower, next_angle, radii),
-                sphere_point(upper, next_angle, radii),
-                sphere_point(upper, angle, radii),
-            ];
-            let normals = points.map(|point| ellipsoid_normal(point, radii));
-            let base = mesh.vertices.len() as u32;
-            for ((point, normal), (latitude, longitude)) in points.into_iter().zip(normals).zip([
-                (lower, angle),
-                (lower, next_angle),
-                (upper, next_angle),
-                (upper, angle),
-            ]) {
-                mesh.vertices.push(UnionVertex {
-                    position: point,
-                    normal,
-                    tex_coord: [
-                        longitude / std::f32::consts::TAU
-                            * (std::f32::consts::TAU * equatorial_radius)
-                            / tile,
-                        (latitude + std::f32::consts::FRAC_PI_2) * meridian_radius / tile,
-                    ],
-                    color: [255; 4],
-                });
-            }
+            let lower = (ring * columns + segment) as u32;
+            let upper = lower + columns as u32;
             mesh.indices
-                .extend([base, base + 3, base + 2, base, base + 2, base + 1]);
+                .extend([lower, upper, upper + 1, lower, upper + 1, lower + 1]);
         }
     }
     mesh
@@ -609,7 +593,7 @@ mod tests {
     fn sphere_normals_follow_ellipsoid_surface() {
         let mesh = sphere_mesh(Vector3::new(4.0, 6.0, 8.0), 2.0);
         let longitude = SPHERE_SEGMENTS / 8;
-        let vertex = &mesh.vertices[(SPHERE_RINGS / 2 * SPHERE_SEGMENTS + longitude) * 4];
+        let vertex = &mesh.vertices[SPHERE_RINGS / 2 * (SPHERE_SEGMENTS + 1) + longitude];
         let inverse_sqrt_five = 5.0f32.sqrt().recip();
 
         assert_vector_close(
@@ -641,17 +625,34 @@ mod tests {
     fn sphere_uvs_follow_surface_arc_lengths() {
         let mesh = sphere_mesh(Vector3::new(4.0, 4.0, 4.0), 2.0);
         let longitude_step = std::f32::consts::TAU / SPHERE_SEGMENTS as f32;
+        let columns = SPHERE_SEGMENTS + 1;
 
         assert_close(mesh.vertices[0].tex_coord[0], 0.0);
         assert_close(mesh.vertices[1].tex_coord[0], longitude_step);
         assert_close(mesh.vertices[0].tex_coord[1], 0.0);
         assert_close(
-            mesh.vertices[2].tex_coord[1],
+            mesh.vertices[columns + 1].tex_coord[1],
             std::f32::consts::PI / SPHERE_RINGS as f32,
         );
         assert_close(
-            mesh.vertices[(SPHERE_SEGMENTS - 1) * 4 + 1].tex_coord[0],
+            mesh.vertices[SPHERE_SEGMENTS].tex_coord[0],
             std::f32::consts::TAU,
+        );
+    }
+
+    #[test]
+    fn sphere_reuses_seam_aware_grid_vertices() {
+        let mesh = sphere_mesh(Vector3::new(4.0, 4.0, 4.0), 2.0);
+
+        assert_eq!(
+            mesh.vertices.len(),
+            (SPHERE_RINGS + 1) * (SPHERE_SEGMENTS + 1)
+        );
+        assert_eq!(mesh.indices.len(), SPHERE_RINGS * SPHERE_SEGMENTS * 6);
+        assert!(
+            mesh.indices
+                .iter()
+                .all(|index| (*index as usize) < mesh.vertices.len())
         );
     }
 
@@ -660,10 +661,10 @@ mod tests {
         let size = Vector3::new(4.0, 4.0, 4.0);
         let sphere = sphere_mesh(size, 2.0);
         let cylinder = cylinder_mesh(size, 2.0);
-        let equator = SPHERE_RINGS / 2 * SPHERE_SEGMENTS * 4;
+        let equator = SPHERE_RINGS / 2 * (SPHERE_SEGMENTS + 1);
         let sphere_diagonal_midpoint = midpoint(
             sphere.vertices[equator].position,
-            sphere.vertices[equator + 2].position,
+            sphere.vertices[equator + SPHERE_SEGMENTS + 2].position,
         );
         let cylinder_edge_midpoint =
             midpoint(cylinder.vertices[0].position, cylinder.vertices[1].position);

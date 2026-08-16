@@ -235,25 +235,30 @@ fn parse_model(
                     }
                 }
             }
-            "UnionOperation" => match metadata::property_asset_id(instance, "AssetId") {
-                Some(asset_id) => {
-                    asset_ids.push(asset_id.clone());
-                    match load_mesh(&asset_id, download_dir, mesh_dir, mesh_cache) {
-                        Ok(mut mesh) => {
-                            apply_instance_size(&mut mesh, instance);
-                            Some(mesh)
-                        }
-                        Err(error) => {
-                            warnings.push(format!("{} ({}): {error}", instance.name, asset_id));
-                            None
+            "UnionOperation" | "IntersectOperation" => {
+                match metadata::property_asset_id(instance, "AssetId") {
+                    Some(asset_id) => {
+                        asset_ids.push(asset_id.clone());
+                        match load_mesh(&asset_id, download_dir, mesh_dir, mesh_cache) {
+                            Ok(mut mesh) => {
+                                apply_instance_size(&mut mesh, instance);
+                                Some(mesh)
+                            }
+                            Err(error) => {
+                                warnings.push(format!("{} ({}): {error}", instance.name, asset_id));
+                                None
+                            }
                         }
                     }
+                    None => {
+                        warnings.push(format!(
+                            "{}: {} has no AssetId",
+                            instance.name, instance.class
+                        ));
+                        None
+                    }
                 }
-                None => {
-                    warnings.push(format!("{}: UnionOperation has no AssetId", instance.name));
-                    None
-                }
-            },
+            }
             _ => None,
         };
 
@@ -275,6 +280,7 @@ fn parse_model(
         }
 
         if let Some(mut mesh) = mesh {
+            apply_imported_mesh_vertex_colors(&mut mesh, instance);
             apply_meshpart_material_uvs(&mut mesh, instance, &material, matrix, studs_per_tile);
             primitives.push(ModelPrimitive {
                 name: instance.name.clone(),
@@ -295,6 +301,22 @@ fn parse_model(
         warnings,
         asset_ids,
     })
+}
+
+fn apply_imported_mesh_vertex_colors(mesh: &mut UnionMesh, instance: &Instance) {
+    if !matches!(
+        instance.class.as_str(),
+        "MeshPart" | "UnionOperation" | "IntersectOperation"
+    ) || !metadata::use_part_color(instance)
+    {
+        return;
+    }
+
+    for vertex in &mut mesh.vertices {
+        vertex.color[0] = 255;
+        vertex.color[1] = 255;
+        vertex.color[2] = 255;
+    }
 }
 
 fn primitive_mesh(instance: &Instance, matrix: [f32; 16], studs_per_tile: f32) -> UnionMesh {
@@ -615,6 +637,38 @@ mod tests {
     }
 
     #[test]
+    fn applies_or_preserves_imported_mesh_vertex_colors_from_use_part_color() {
+        for class in ["MeshPart", "UnionOperation", "IntersectOperation"] {
+            let dom = WeakDom::new(InstanceBuilder::new(class).with_property("UsePartColor", true));
+            let mut mesh = UnionMesh {
+                vertices: vec![UnionVertex {
+                    position: [0.0, 0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    tex_coord: [0.0, 0.0],
+                    color: [20, 40, 60, 80],
+                }],
+                indices: Vec::new(),
+            };
+            apply_imported_mesh_vertex_colors(&mut mesh, dom.root());
+            assert_eq!(mesh.vertices[0].color, [255, 255, 255, 80], "{class}");
+
+            let dom =
+                WeakDom::new(InstanceBuilder::new(class).with_property("UsePartColor", false));
+            let mut mesh = UnionMesh {
+                vertices: vec![UnionVertex {
+                    position: [0.0, 0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    tex_coord: [0.0, 0.0],
+                    color: [20, 40, 60, 80],
+                }],
+                indices: Vec::new(),
+            };
+            apply_imported_mesh_vertex_colors(&mut mesh, dom.root());
+            assert_eq!(mesh.vertices[0].color, [20, 40, 60, 80], "{class}");
+        }
+    }
+
+    #[test]
     fn finds_geometry_under_a_model_root() {
         let dom = WeakDom::new(
             InstanceBuilder::new("Model")
@@ -622,6 +676,26 @@ mod tests {
         );
 
         assert_eq!(model_roots(&dom), vec![dom.root_ref()]);
+    }
+
+    #[test]
+    fn collects_intersect_operation_assets_from_a_fixture() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/PREPROCESSED - coalescent refiner.rbxmx");
+        let models = parse_models(
+            &path,
+            std::path::Path::new("missing-download-directory"),
+            std::path::Path::new("missing-mesh-directory"),
+            1.0,
+        )
+        .unwrap();
+
+        assert!(models.iter().any(|model| {
+            model
+                .asset_ids
+                .iter()
+                .any(|asset_id| asset_id == "16907345048")
+        }));
     }
 
     #[test]

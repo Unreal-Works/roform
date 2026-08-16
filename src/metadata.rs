@@ -59,9 +59,11 @@ pub(crate) fn material_for(dom: &WeakDom, instance: &Instance) -> ModelMaterial 
     material
 }
 
-fn use_part_color(instance: &Instance) -> bool {
+pub(crate) fn use_part_color(instance: &Instance) -> bool {
     match instance.class.as_str() {
-        "UnionOperation" => property_bool(instance, "UsePartColor").unwrap_or(false),
+        "UnionOperation" | "IntersectOperation" => {
+            property_bool(instance, "UsePartColor").unwrap_or(false)
+        }
         "MeshPart" => property_bool(instance, "UsePartColor").unwrap_or(true),
         _ => true,
     }
@@ -77,7 +79,12 @@ pub(crate) fn direct_child(dom: &WeakDom, instance: &Instance, class: &str) -> O
 pub(crate) fn is_geometry(instance: &Instance) -> bool {
     matches!(
         instance.class.as_str(),
-        "Part" | "WedgePart" | "CornerWedgePart" | "MeshPart" | "UnionOperation"
+        "Part"
+            | "WedgePart"
+            | "CornerWedgePart"
+            | "MeshPart"
+            | "UnionOperation"
+            | "IntersectOperation"
     )
 }
 
@@ -360,8 +367,16 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_csg_operation_classes_as_geometry() {
+        for class in ["UnionOperation", "IntersectOperation"] {
+            let dom = WeakDom::new(InstanceBuilder::new(class));
+            assert!(is_geometry(dom.root()), "{class} should be geometry");
+        }
+    }
+
+    #[test]
     fn only_applies_part_color_when_enabled_for_imported_geometry() {
-        for class in ["MeshPart", "UnionOperation"] {
+        for class in ["MeshPart", "UnionOperation", "IntersectOperation"] {
             let dom = WeakDom::new(
                 InstanceBuilder::new(class)
                     .with_property("Color", Color3uint8::new(64, 128, 192))
@@ -399,6 +414,12 @@ mod tests {
 
         let dom = WeakDom::new(
             InstanceBuilder::new("UnionOperation")
+                .with_property("Color", Color3uint8::new(64, 128, 192)),
+        );
+        assert_eq!(material_for(&dom, dom.root()).color, [1.0, 1.0, 1.0, 1.0]);
+
+        let dom = WeakDom::new(
+            InstanceBuilder::new("IntersectOperation")
                 .with_property("Color", Color3uint8::new(64, 128, 192)),
         );
         assert_eq!(material_for(&dom, dom.root()).color, [1.0, 1.0, 1.0, 1.0]);
