@@ -10,7 +10,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-const MODEL_FORMAT_VERSION: u32 = 1;
+const MODEL_MANIFEST_VERSION: u32 = 1;
 const MESH_MANIFEST_VERSION: u32 = 1;
 const MISSING_DEPENDENCY_HASH: &str = "<missing>";
 
@@ -536,7 +536,7 @@ pub fn export_models(
     }
 
     let manifest = ModelManifest {
-        version: MODEL_FORMAT_VERSION,
+        version: MODEL_MANIFEST_VERSION,
         studs_per_tile,
         includes_materials,
         dependencies: manifest_dependencies,
@@ -665,7 +665,7 @@ fn model_fingerprint(
     context: ModelFingerprintContext<'_>,
 ) -> Result<String, String> {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(format!("roform-model-v{MODEL_FORMAT_VERSION}").as_bytes());
+    hasher.update(format!("roform-model-v{MODEL_MANIFEST_VERSION}").as_bytes());
     hasher.update(source_bytes);
     hasher.update(model_index.to_string().as_bytes());
     hasher.update(&studs_per_tile.to_le_bytes());
@@ -708,7 +708,7 @@ fn reusable_manifest(
 ) -> Option<ModelManifest> {
     let manifest_bytes = fs::read(output_dir.join("manifest.json")).ok()?;
     let manifest: ModelManifest = serde_json::from_slice(&manifest_bytes).ok()?;
-    if manifest.version != MODEL_FORMAT_VERSION
+    if manifest.version != MODEL_MANIFEST_VERSION
         || manifest.studs_per_tile != studs_per_tile
         || manifest.includes_materials != includes_materials
     {
@@ -879,7 +879,7 @@ impl FingerprintState {
         let previous = fs::read(fingerprint_path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<FingerprintCache>(&bytes).ok())
-            .filter(|cache| cache.version == MODEL_FORMAT_VERSION)
+            .filter(|cache| cache.version == MODEL_MANIFEST_VERSION)
             .map(normalize_fingerprint_cache);
         Self {
             previous,
@@ -938,7 +938,7 @@ impl FingerprintState {
 
     fn write(&self, cache_path: &Path) {
         let cache = FingerprintCache {
-            version: MODEL_FORMAT_VERSION,
+            version: MODEL_MANIFEST_VERSION,
             files: self.current.clone(),
         };
         if let Ok(bytes) = serde_json::to_vec(&cache)
@@ -1032,7 +1032,7 @@ mod tests {
         fs::write(buffer_dir.join("a.bin"), b"").unwrap();
 
         let manifest = ModelManifest {
-            version: MODEL_FORMAT_VERSION,
+            version: MODEL_MANIFEST_VERSION,
             studs_per_tile: 1.0,
             includes_materials: true,
             dependencies: BTreeMap::new(),
