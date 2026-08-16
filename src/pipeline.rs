@@ -11,6 +11,7 @@ use std::{
 };
 
 const MODEL_FORMAT_VERSION: u32 = 1;
+const MESH_MANIFEST_VERSION: u32 = 1;
 const MISSING_DEPENDENCY_HASH: &str = "<missing>";
 
 /// The result of exporting the models found in an input path.
@@ -29,7 +30,20 @@ pub struct ModelReport {
     pub output_directory: PathBuf,
 }
 
-/// A model that failed during an export stage.
+/// The result of compiling decoded meshes found in an input path.
+#[derive(Debug)]
+pub struct MeshReport {
+    /// Number of decoded mesh cache files written during this call.
+    pub decoded: usize,
+    /// Number of decoded mesh cache files reused during this call.
+    pub cached: usize,
+    /// Sources whose mesh assets could not be decoded.
+    pub failed: Vec<ModelFailure>,
+    /// Absolute directory containing decoded mesh cache files and its manifest.
+    pub output_directory: PathBuf,
+}
+
+/// A source that failed during an export stage.
 #[derive(Debug)]
 pub struct ModelFailure {
     /// Source file or model name associated with the failure.
@@ -60,6 +74,25 @@ struct ModelManifest {
     dependencies: BTreeMap<String, String>,
     sources: Vec<ModelSourceManifestEntry>,
     models: Vec<ModelManifestEntry>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct MeshManifest {
+    version: u32,
+    sources: Vec<MeshSourceManifestEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct MeshSourceManifestEntry {
+    source: String,
+    hash: String,
+    meshes: Vec<MeshManifestEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct MeshManifestEntry {
+    asset_id: String,
+    payload_hash: String,
 }
 
 /// Metadata for a model GLTF file produced by [`export_models`].
@@ -109,10 +142,6 @@ pub struct ModelExportOptions {
     /// Whether material definitions and available material textures are
     /// included in the exported GLTF. The default is `true`.
     pub includes_materials: bool,
-    /// Whether decoded meshes should also be compiled into model GLTF files.
-    /// Meshes are decoded and cached even when this is `false`. The default is
-    /// `true`.
-    pub compile_models: bool,
     /// Whether existing model GLTF files should be ignored and regenerated.
     /// Cached downloads and decoded meshes are still reusable. The default is
     /// `false`.
@@ -124,7 +153,6 @@ impl Default for ModelExportOptions {
         Self {
             studs_per_tile: 1.0,
             includes_materials: true,
-            compile_models: true,
             recompile: false,
         }
     }
@@ -139,6 +167,135 @@ impl ModelExportOptions {
     }
 }
 
+/// Compile and cache the decoded mesh payloads referenced by `input`.
+///
+/// Mesh cache entries are content-addressed by their source payload, while
+/// the mesh manifest lets unchanged Roblox source files skip DOM parsing and
+/// revalidate their referenced payloads directly. Downloaded assets are not
+/// affected by this stage and must already be present in `download_dir`.
+pub fn export_meshes(
+    input: &Path,
+    download_dir: &Path,
+    mesh_dir: &Path,
+) -> Result<MeshReport, String> {
+    let download_dir = absolute_path(download_dir)?;
+    let mesh_dir = absolute_path(mesh_dir)?;
+    fs::create_dir_all(&mesh_dir).map_err(|error| {
+        format!(
+            "failed to create decoded mesh directory {}: {error}",
+            mesh_dir.display()
+        )
+    })?;
+
+    let source_files = model::source_files(input)?
+        .into_iter()
+        .map(|path| absolute_path(&path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let previous_manifest = reusable_mesh_manifest(&mesh_dir);
+    let current_sources = source_files
+        .iter()
+        .map(|path| cache_path(path))
+        .collect::<HashSet<_>>();
+    let mut manifest_sources = previous_manifest
+        .as_ref()
+        .map(|manifest| {
+            manifest
+                .sources
+                .iter()
+                .filter(|source| !current_sources.contains(&source.source))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut report = MeshReport {
+        decoded: 0,
+        cached: 0,
+        failed: Vec::new(),
+        output_directory: mesh_dir.to_owned(),
+    };
+
+    for source_path in source_files {
+        let source = cache_path(&source_path);
+        let source_bytes = match fs::read(&source_path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                report.failed.push(ModelFailure {
+                    source: source_path.display().to_string(),
+                    error: format!("failed to read source: {error}"),
+                });
+                continue;
+            }
+        };
+        let source_hash = blake3::hash(&source_bytes).to_hex().to_string();
+        let mesh_ids = if let Some(entry) = previous_manifest.as_ref().and_then(|manifest| {
+            manifest
+                .sources
+                .iter()
+                .find(|entry| entry.source == source && entry.hash == source_hash)
+        }) {
+            entry
+                .meshes
+                .iter()
+                .map(|mesh| mesh.asset_id.clone())
+                .collect::<Vec<_>>()
+        } else {
+            match model::mesh_asset_ids(&source_path) {
+                Ok(mesh_ids) => mesh_ids,
+                Err(error) => {
+                    report.failed.push(ModelFailure {
+                        source: source_path.display().to_string(),
+                        error,
+                    });
+                    continue;
+                }
+            }
+        };
+
+        let mut meshes = Vec::with_capacity(mesh_ids.len());
+        let mut failed = false;
+        for asset_id in mesh_ids {
+            match model::cache_mesh_asset(&asset_id, &download_dir, &mesh_dir) {
+                Ok((payload_hash, cached)) => {
+                    if cached {
+                        report.cached += 1;
+                    } else {
+                        report.decoded += 1;
+                    }
+                    meshes.push(MeshManifestEntry {
+                        asset_id,
+                        payload_hash,
+                    });
+                }
+                Err(error) => {
+                    report.failed.push(ModelFailure {
+                        source: format!("{} / {}", source_path.display(), asset_id),
+                        error,
+                    });
+                    failed = true;
+                }
+            }
+        }
+        if !failed {
+            manifest_sources.push(MeshSourceManifestEntry {
+                source,
+                hash: source_hash,
+                meshes,
+            });
+        }
+    }
+
+    let manifest = MeshManifest {
+        version: MESH_MANIFEST_VERSION,
+        sources: manifest_sources,
+    };
+    let manifest = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("failed to serialize mesh manifest: {error}"))?;
+    fs::write(mesh_dir.join("manifest.json"), format!("{manifest}\n"))
+        .map_err(|error| format!("failed to write mesh manifest: {error}"))?;
+
+    Ok(report)
+}
+
 /// Export the Roblox models found at `input` as GLTF files.
 ///
 /// `input` may be a single `.rbxm`, `.rbxmx`, `.rbxl`, or `.rbxlx` file, or a
@@ -147,8 +304,7 @@ impl ModelExportOptions {
 /// contain downloaded Roblox assets referenced by the input, and `materials_dir`
 /// may contain fallback material images. `mesh_dir` stores decoded mesh cache
 /// files and `output_dir` stores model GLTF files, external buffers, and the
-/// model manifest when `options.compile_models` is `true`. Meshes are still
-/// decoded when model compilation is disabled.
+/// model manifest.
 ///
 /// A successful result can still contain entries in [`ModelReport::failed`].
 /// Per-source and per-model failures are reported there while processing
@@ -168,7 +324,6 @@ pub fn export_models(
     let ModelExportOptions {
         studs_per_tile,
         includes_materials,
-        compile_models,
         recompile,
     } = options;
     let download_dir = absolute_path(download_dir)?;
@@ -181,49 +336,17 @@ pub fn export_models(
             mesh_dir.display()
         )
     })?;
-    if compile_models {
-        fs::create_dir_all(&output_dir).map_err(|error| {
-            format!(
-                "failed to create model output directory {}: {error}",
-                output_dir.display()
-            )
-        })?;
-    }
+    fs::create_dir_all(&output_dir).map_err(|error| {
+        format!(
+            "failed to create model output directory {}: {error}",
+            output_dir.display()
+        )
+    })?;
 
     let source_files = model::source_files(input)?
         .into_iter()
         .map(|path| absolute_path(&path))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut report = ModelReport {
-        exported: 0,
-        cached: 0,
-        failed: Vec::new(),
-        models: Vec::new(),
-        output_directory: output_dir.to_owned(),
-    };
-    if !compile_models {
-        for source_path in source_files {
-            match model::parse_models(&source_path, &download_dir, &mesh_dir, studs_per_tile) {
-                Ok(models) => {
-                    for model_asset in models {
-                        for warning in &model_asset.warnings {
-                            eprintln!(
-                                "warning model {} in {}: {}",
-                                model_asset.name,
-                                source_path.display(),
-                                warning
-                            );
-                        }
-                    }
-                }
-                Err(error) => report.failed.push(ModelFailure {
-                    source: source_path.display().to_string(),
-                    error,
-                }),
-            }
-        }
-        return Ok(report);
-    }
     let source_entries = source_manifest_entries(&source_files).unwrap_or_default();
     let source_hashes = source_entries
         .iter()
@@ -265,6 +388,13 @@ pub fn export_models(
         .as_ref()
         .map(|manifest| manifest.dependencies.clone())
         .unwrap_or_default();
+    let mut report = ModelReport {
+        exported: 0,
+        cached: 0,
+        failed: Vec::new(),
+        models: Vec::new(),
+        output_directory: output_dir.to_owned(),
+    };
     for source_path in source_files {
         let source = cache_path(&source_path);
         if let Some(source_hash) = source_hashes.get(&source)
@@ -509,6 +639,22 @@ fn absolute_path(path: &Path) -> Result<PathBuf, String> {
 
 fn cache_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+fn reusable_mesh_manifest(mesh_dir: &Path) -> Option<MeshManifest> {
+    let manifest_bytes = fs::read(mesh_dir.join("manifest.json")).ok()?;
+    let manifest: MeshManifest = serde_json::from_slice(&manifest_bytes).ok()?;
+    if manifest.version != MESH_MANIFEST_VERSION {
+        return None;
+    }
+    Some(normalize_mesh_manifest_paths(manifest))
+}
+
+fn normalize_mesh_manifest_paths(mut manifest: MeshManifest) -> MeshManifest {
+    for source in &mut manifest.sources {
+        source.source = cache_path(Path::new(&source.source));
+    }
+    manifest
 }
 
 fn model_fingerprint(
@@ -818,7 +964,7 @@ mod tests {
     }
 
     #[test]
-    fn skips_model_outputs_but_keeps_mesh_stage() {
+    fn caches_mesh_stage_without_compiling_model_outputs() {
         let root = std::env::temp_dir().join(format!(
             "roform-pipeline-no-model-{}-{}",
             std::process::id(),
@@ -847,20 +993,10 @@ mod tests {
         )
         .unwrap();
 
-        let report = export_models(
-            &input,
-            &download_dir,
-            &root.join("mesh"),
-            &root.join("assets"),
-            &root.join("model"),
-            ModelExportOptions {
-                compile_models: false,
-                ..ModelExportOptions::default()
-            },
-        )
-        .unwrap();
+        let report = export_meshes(&input, &download_dir, &root.join("mesh")).unwrap();
 
-        assert!(report.models.is_empty());
+        assert_eq!(report.decoded, 1);
+        assert_eq!(report.cached, 0);
         assert!(report.failed.is_empty());
         assert!(root.join("mesh").is_dir());
         assert!(
@@ -869,6 +1005,11 @@ mod tests {
                 .is_file()
         );
         assert!(!root.join("model").exists());
+
+        let cached = export_meshes(&input, &download_dir, &root.join("mesh")).unwrap();
+        assert_eq!(cached.decoded, 0);
+        assert_eq!(cached.cached, 1);
+        assert!(cached.failed.is_empty());
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -966,7 +1107,6 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
-                compile_models: true,
                 recompile: false,
             },
         )
@@ -995,7 +1135,6 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
-                compile_models: true,
                 recompile: false,
             },
         )
@@ -1021,7 +1160,6 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
-                compile_models: true,
                 recompile: false,
             },
         )
@@ -1038,7 +1176,6 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
-                compile_models: true,
                 recompile: false,
             },
         )
@@ -1055,7 +1192,6 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
-                compile_models: true,
                 recompile: false,
             },
         )
@@ -1072,7 +1208,6 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
-                compile_models: true,
                 recompile: true,
             },
         )

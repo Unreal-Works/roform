@@ -52,28 +52,7 @@ pub(crate) fn parse_models(
     mesh_dir: &Path,
     studs_per_tile: f32,
 ) -> Result<Vec<ModelAsset>, String> {
-    let extension = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let file = fs::File::open(path)
-        .map_err(|error| format!("failed to open model source {}: {error}", path.display()))?;
-    let dom = match extension.as_str() {
-        "rbxm" | "rbxl" => rbx_binary::from_reader(file)
-            .map_err(|error| format!("failed to decode {}: {error}", path.display()))?,
-        "rbxmx" | "rbxlx" => {
-            rbx_xml::from_reader(BufReader::new(file), rbx_xml::DecodeOptions::default())
-                .map_err(|error| format!("failed to decode {}: {error}", path.display()))?
-        }
-        _ => {
-            return Err(format!(
-                "unsupported Roblox source extension for {}",
-                path.display()
-            ));
-        }
-    };
-
+    let dom = decode_source(path)?;
     let roots = model_roots(&dom);
     let mut mesh_cache = HashMap::new();
     roots
@@ -89,6 +68,92 @@ pub(crate) fn parse_models(
             )
         })
         .collect()
+}
+
+pub(crate) fn mesh_asset_ids(path: &Path) -> Result<Vec<String>, String> {
+    let dom = decode_source(path)?;
+    let mut asset_ids = Vec::new();
+    for instance in std::iter::once(dom.root()).chain(dom.descendants()) {
+        match instance.class.as_str() {
+            "Part" => {
+                if let Some(special_mesh_ref) =
+                    metadata::direct_child(&dom, instance, "SpecialMesh")
+                    && let Some(special_mesh) = dom.get_by_ref(special_mesh_ref)
+                    && let Some(asset_id) = metadata::property_asset_id(special_mesh, "MeshId")
+                {
+                    asset_ids.push(asset_id);
+                }
+            }
+            "MeshPart" => {
+                if let Some(asset_id) = metadata::property_asset_id(instance, "MeshId")
+                    .or_else(|| metadata::property_asset_id(instance, "MeshContent"))
+                {
+                    asset_ids.push(asset_id);
+                }
+            }
+            "UnionOperation" | "IntersectOperation" => {
+                if let Some(asset_id) = metadata::property_asset_id(instance, "AssetId") {
+                    asset_ids.push(asset_id);
+                }
+            }
+            _ => {}
+        }
+    }
+    asset_ids.sort();
+    asset_ids.dedup();
+    Ok(asset_ids)
+}
+
+pub(crate) fn cache_mesh_asset(
+    asset_id: &str,
+    download_dir: &Path,
+    mesh_dir: &Path,
+) -> Result<(String, bool), String> {
+    let (source_path, packaged, bytes, cache_path) =
+        mesh_payload(asset_id, download_dir, mesh_dir)?;
+    let payload_hash = blake3::hash(&bytes).to_hex().to_string();
+    match fs::read(&cache_path) {
+        Ok(cached_bytes) => {
+            if csg::decode_cached_mesh(&cached_bytes).is_ok() {
+                return Ok((payload_hash, true));
+            }
+            decode_and_cache_mesh(&bytes, &source_path, packaged, &cache_path)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            decode_and_cache_mesh(&bytes, &source_path, packaged, &cache_path)?;
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to read decoded mesh cache {}: {error}",
+                cache_path.display()
+            ));
+        }
+    }
+    Ok((payload_hash, false))
+}
+
+fn decode_source(path: &Path) -> Result<WeakDom, String> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let file = fs::File::open(path)
+        .map_err(|error| format!("failed to open model source {}: {error}", path.display()))?;
+    Ok(match extension.as_str() {
+        "rbxm" | "rbxl" => rbx_binary::from_reader(file)
+            .map_err(|error| format!("failed to decode {}: {error}", path.display()))?,
+        "rbxmx" | "rbxlx" => {
+            rbx_xml::from_reader(BufReader::new(file), rbx_xml::DecodeOptions::default())
+                .map_err(|error| format!("failed to decode {}: {error}", path.display()))?
+        }
+        _ => {
+            return Err(format!(
+                "unsupported Roblox source extension for {}",
+                path.display()
+            ));
+        }
+    })
 }
 
 fn collect_source_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -350,6 +415,28 @@ fn load_mesh(
         return mesh.clone();
     }
 
+    let result = mesh_payload(asset_id, download_dir, mesh_dir).and_then(
+        |(source_path, packaged, bytes, cache_path)| match fs::read(&cache_path) {
+            Ok(cached_bytes) => csg::decode_cached_mesh(&cached_bytes)
+                .or_else(|_| decode_and_cache_mesh(&bytes, &source_path, packaged, &cache_path)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                decode_and_cache_mesh(&bytes, &source_path, packaged, &cache_path)
+            }
+            Err(error) => Err(format!(
+                "failed to read decoded mesh cache {}: {error}",
+                cache_path.display()
+            )),
+        },
+    );
+    cache.insert(asset_id.to_owned(), result.clone());
+    result
+}
+
+fn mesh_payload(
+    asset_id: &str,
+    download_dir: &Path,
+    mesh_dir: &Path,
+) -> Result<(PathBuf, bool, Vec<u8>, PathBuf), String> {
     let asset_dir = download_dir.join(asset_id);
     let payload_path = asset_dir.join("asset.bin");
     let (source_path, packaged) = if payload_path.is_file() {
@@ -357,25 +444,10 @@ fn load_mesh(
     } else {
         (asset_dir.join("asset.rbxm"), true)
     };
-    let result = fs::read(&source_path)
-        .map_err(|error| format!("failed to read {}: {error}", source_path.display()))
-        .and_then(|bytes| {
-            let cache_path = mesh_dir.join(format!("{}.bin", blake3::hash(&bytes).to_hex()));
-            match fs::read(&cache_path) {
-                Ok(cached_bytes) => csg::decode_cached_mesh(&cached_bytes).or_else(|_| {
-                    decode_and_cache_mesh(&bytes, &source_path, packaged, &cache_path)
-                }),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    decode_and_cache_mesh(&bytes, &source_path, packaged, &cache_path)
-                }
-                Err(error) => Err(format!(
-                    "failed to read decoded mesh cache {}: {error}",
-                    cache_path.display()
-                )),
-            }
-        });
-    cache.insert(asset_id.to_owned(), result.clone());
-    result
+    let bytes = fs::read(&source_path)
+        .map_err(|error| format!("failed to read {}: {error}", source_path.display()))?;
+    let cache_path = mesh_dir.join(format!("{}.bin", blake3::hash(&bytes).to_hex()));
+    Ok((source_path, packaged, bytes, cache_path))
 }
 
 fn decode_and_cache_mesh(

@@ -1,6 +1,6 @@
 use clap::{Parser, ValueEnum};
 use mhif::{DownloadOptions, download_assets, extract_asset_ids_cached};
-use roform::{ModelExportOptions, export_glbs, export_models};
+use roform::{ModelExportOptions, export_glbs, export_meshes, export_models};
 use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -135,7 +135,23 @@ fn run(
         download_start_time.elapsed().as_secs_f64()
     );
 
-    let model_report = if compile.mesh {
+    if compile.mesh {
+        let mesh_start_time = std::time::Instant::now();
+        let mesh_report = export_meshes(&input, &download_out_dir, &out_dir.join("mesh"))?;
+        for failure in &mesh_report.failed {
+            eprintln!("failed mesh {}: {}", failure.source, failure.error);
+        }
+        println!(
+            "mesh: decoded {}, reused {}, failed {} -> {} in {:.2}s",
+            mesh_report.decoded,
+            mesh_report.cached,
+            mesh_report.failed.len(),
+            mesh_report.output_directory.display(),
+            mesh_start_time.elapsed().as_secs_f64()
+        );
+    }
+
+    let model_report = if compile.model {
         let model_start_time = std::time::Instant::now();
         let model_report = export_models(
             &input,
@@ -146,30 +162,20 @@ fn run(
             ModelExportOptions {
                 studs_per_tile,
                 includes_materials,
-                compile_models: compile.model,
                 recompile,
             },
         )?;
         for failure in &model_report.failed {
-            let stage = if compile.model { "model" } else { "mesh" };
-            eprintln!("failed {stage} {}: {}", failure.source, failure.error);
+            eprintln!("failed model {}: {}", failure.source, failure.error);
         }
-        if compile.model {
-            println!(
-                "model: exported {}, reused {}, failed {} -> {} in {:.2}s",
-                model_report.exported,
-                model_report.cached,
-                model_report.failed.len(),
-                model_report.output_directory.display(),
-                model_start_time.elapsed().as_secs_f64()
-            );
-        } else {
-            println!(
-                "mesh: decoded -> {} in {:.2}s",
-                out_dir.join("mesh").display(),
-                model_start_time.elapsed().as_secs_f64()
-            );
-        }
+        println!(
+            "model: exported {}, reused {}, failed {} -> {} in {:.2}s",
+            model_report.exported,
+            model_report.cached,
+            model_report.failed.len(),
+            model_report.output_directory.display(),
+            model_start_time.elapsed().as_secs_f64()
+        );
         Some(model_report)
     } else {
         None

@@ -94,7 +94,9 @@ For default `--out-dir roform`, the pipeline creates the following directory str
 ```text
 roform/
 ├── download/                 # Downloaded Roblox assets
-├── mesh/                     # Decoded mesh cache
+├── mesh/                     # Decoded mesh cache and source manifest
+│   ├── <hash>.bin            # ROFMESH1 decoded payload
+│   └── manifest.json         # Source-to-mesh cache mapping
 ├── model/                    # glTF documents when model compilation is selected
 │   ├── M<hash>.gltf          # glTF with materials if --materials-dir is used
 │   ├── <hash>.gltf           # glTF without materials when --materials-dir is omitted
