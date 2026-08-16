@@ -32,7 +32,7 @@ struct Cli {
     #[arg(
         long,
         value_name = "STUDS",
-        default_value_t = 1.0,
+        default_value_t = 2.0,
         help = "Physical studs represented by one texture tile"
     )]
     studs_per_tile: f32,
