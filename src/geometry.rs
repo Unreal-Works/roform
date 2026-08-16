@@ -1,6 +1,8 @@
 use crate::csg::{UnionMesh, UnionVertex};
 use rbx_types::Vector3;
 
+const CYLINDER_SEGMENTS: usize = 64;
+
 pub(crate) fn primitive_mesh(instance_shape: u32, size: Vector3, studs_per_tile: f32) -> UnionMesh {
     match instance_shape {
         0 => sphere_mesh(size, studs_per_tile),
@@ -133,7 +135,7 @@ fn box_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
 }
 
 fn cylinder_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
-    let segments = 24usize;
+    let segments = CYLINDER_SEGMENTS;
     let radius = size.y.abs().min(size.z.abs()) * 0.5;
     let half_height = size.x.abs() * 0.5;
     let tile = studs_per_tile.max(f32::EPSILON);
@@ -555,9 +557,21 @@ mod tests {
     }
 
     #[test]
+    fn cylinder_uses_high_resolution_radial_topology() {
+        let mesh = cylinder_mesh(Vector3::new(10.0, 4.0, 4.0), 2.0);
+
+        assert_eq!(mesh.vertices.len(), CYLINDER_SEGMENTS * 10);
+        assert_eq!(mesh.indices.len(), CYLINDER_SEGMENTS * 18);
+
+        let angular_step = std::f32::consts::TAU / CYLINDER_SEGMENTS as f32;
+        assert_close(mesh.vertices[10].normal[1], angular_step.cos());
+        assert_close(mesh.vertices[10].normal[2], angular_step.sin());
+    }
+
+    #[test]
     fn cylinder_side_uvs_follow_the_full_circumference() {
         let mesh = cylinder_mesh(Vector3::new(10.0, 4.0, 4.0), 2.0);
-        let segment_step = std::f32::consts::TAU * 2.0 / 24.0 / 2.0;
+        let segment_step = std::f32::consts::TAU * 2.0 / CYLINDER_SEGMENTS as f32 / 2.0;
         let side_vertices_per_segment = 10;
 
         assert_close(mesh.vertices[0].tex_coord[0], 0.0);
@@ -567,7 +581,7 @@ mod tests {
             segment_step,
         );
         assert_close(
-            mesh.vertices[23 * side_vertices_per_segment + 1].tex_coord[0],
+            mesh.vertices[(CYLINDER_SEGMENTS - 1) * side_vertices_per_segment + 1].tex_coord[0],
             std::f32::consts::TAU,
         );
         assert_close(mesh.vertices[2].tex_coord[1], 5.0);
