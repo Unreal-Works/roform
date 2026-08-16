@@ -2,6 +2,8 @@ use crate::csg::{UnionMesh, UnionVertex};
 use rbx_types::Vector3;
 
 const CYLINDER_SEGMENTS: usize = 64;
+const SPHERE_RINGS: usize = CYLINDER_SEGMENTS;
+const SPHERE_SEGMENTS: usize = CYLINDER_SEGMENTS * 2;
 
 pub(crate) fn primitive_mesh(instance_shape: u32, size: Vector3, studs_per_tile: f32) -> UnionMesh {
     match instance_shape {
@@ -215,8 +217,8 @@ fn cylinder_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
 }
 
 fn sphere_mesh(size: Vector3, studs_per_tile: f32) -> UnionMesh {
-    let rings = 10usize;
-    let segments = 24usize;
+    let rings = SPHERE_RINGS;
+    let segments = SPHERE_SEGMENTS;
     let radii = [size.x.abs() * 0.5, size.y.abs() * 0.5, size.z.abs() * 0.5];
     let tile = studs_per_tile.max(f32::EPSILON);
     let equatorial_radius = (radii[0] + radii[2]) * 0.5;
@@ -590,15 +592,38 @@ mod tests {
     #[test]
     fn sphere_uvs_follow_surface_arc_lengths() {
         let mesh = sphere_mesh(Vector3::new(4.0, 4.0, 4.0), 2.0);
-        let longitude_step = std::f32::consts::TAU / 24.0;
+        let longitude_step = std::f32::consts::TAU / SPHERE_SEGMENTS as f32;
 
         assert_close(mesh.vertices[0].tex_coord[0], 0.0);
         assert_close(mesh.vertices[1].tex_coord[0], longitude_step);
         assert_close(mesh.vertices[0].tex_coord[1], 0.0);
-        assert_close(mesh.vertices[2].tex_coord[1], std::f32::consts::PI / 10.0);
         assert_close(
-            mesh.vertices[23 * 4 + 1].tex_coord[0],
+            mesh.vertices[2].tex_coord[1],
+            std::f32::consts::PI / SPHERE_RINGS as f32,
+        );
+        assert_close(
+            mesh.vertices[(SPHERE_SEGMENTS - 1) * 4 + 1].tex_coord[0],
             std::f32::consts::TAU,
+        );
+    }
+
+    #[test]
+    fn sphere_facets_are_at_least_as_full_as_cylinder_facets() {
+        let size = Vector3::new(4.0, 4.0, 4.0);
+        let sphere = sphere_mesh(size, 2.0);
+        let cylinder = cylinder_mesh(size, 2.0);
+        let equator = SPHERE_RINGS / 2 * SPHERE_SEGMENTS * 4;
+        let sphere_diagonal_midpoint = midpoint(
+            sphere.vertices[equator].position,
+            sphere.vertices[equator + 2].position,
+        );
+        let cylinder_edge_midpoint =
+            midpoint(cylinder.vertices[0].position, cylinder.vertices[1].position);
+
+        assert!(
+            vector_length(sphere_diagonal_midpoint)
+                >= radial_length([cylinder_edge_midpoint[1], cylinder_edge_midpoint[2]]),
+            "sphere diagonal is more recessed than the cylinder side"
         );
     }
 
@@ -710,6 +735,22 @@ mod tests {
             (actual - expected).abs() < 1.0e-5,
             "expected {expected}, got {actual}"
         );
+    }
+
+    fn midpoint(first: [f32; 3], second: [f32; 3]) -> [f32; 3] {
+        [
+            (first[0] + second[0]) * 0.5,
+            (first[1] + second[1]) * 0.5,
+            (first[2] + second[2]) * 0.5,
+        ]
+    }
+
+    fn radial_length(value: [f32; 2]) -> f32 {
+        value[0].hypot(value[1])
+    }
+
+    fn vector_length(value: [f32; 3]) -> f32 {
+        value[0].hypot(value[1]).hypot(value[2])
     }
 
     fn assert_uv_extent(vertices: &[UnionVertex], expected: [f32; 2]) {

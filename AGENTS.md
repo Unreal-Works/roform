@@ -18,7 +18,7 @@ Please update this document after any relevant changes.
 - Cache path keys use normalized separators, and model fingerprints use stable source, option, and dependency inputs rather than serialized parsed-model ordering.
 - `roform/mesh/fingerprint.json` caches content hashes for referenced dependency files; it is cache state and must not be included in its own dependency fingerprint.
 - Generated flat-primitive UVs use model-space-anchored, face-normal-derived physical surface projections divided by `--studs-per-tile`; this keeps texture axes and phase consistent across translated or rotated parts and wedges. Cylinder sides follow circumference, spheres follow surface arc lengths, exported textures reference an explicit GLTF `REPEAT` sampler, and normal-mapped primitives include generated tangent space.
-- `Part`, `WedgePart`, and `CornerWedgePart` instances use generated primitive geometry; cylinders use 64 radial segments for a precise silhouette; legacy `Part.Shape` wedge values use the same generators.
+- `Part`, `WedgePart`, and `CornerWedgePart` instances use generated primitive geometry; cylinders use 64 radial segments, while spheres use 128 longitude segments and 64 latitude bands so their diagonal facets are no larger than cylinder facets, and legacy `Part.Shape` wedge values use the same generators.
 
 ## Module Boundaries
 
