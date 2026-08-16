@@ -54,9 +54,9 @@ Roblox [actually already has a GLTF exporter](https://create.roblox.com/docs/art
 2. Can have restrictive asset exports due to account ownership politics.
 3. Does not keep most Instance properties in nodes, effectively rendering the glTF output useless as an intermediate representation.
 
-`roform` gives you your glTF with no strings attached. Shove it into any renderer like Babylon.js, Bevy, and more and you can access the `extras` field for all the properties you could ask for.
+`roform` gives you your glTF with **no strings attached.** Shove it into any renderer like Babylon.js, Bevy, and more and you can access the `extras` field for all the properties you could ask for.
 
-## Caveats
+## Strings Attached
 
 The glTF isn't meant to be consumed directly even thought it _can_, due to some fundamental limitations in glTF itself.
 
