@@ -139,7 +139,7 @@ impl ModelExportOptions {
 /// `input` may be a single `.rbxm`, `.rbxmx`, `.rbxl`, or `.rbxlx` file, or a
 /// directory that is searched recursively for those extensions. Relative paths
 /// are resolved against the current working directory. `download_dir` must
-/// contain downloaded Roblox assets referenced by the input, and `assets_dir`
+/// contain downloaded Roblox assets referenced by the input, and `materials_dir`
 /// may contain fallback material images. `mesh_dir` stores decoded mesh cache
 /// files and `output_dir` stores model GLTF files, external buffers, and the
 /// model manifest.
@@ -154,7 +154,7 @@ pub fn export_models(
     input: &Path,
     download_dir: &Path,
     mesh_dir: &Path,
-    assets_dir: &Path,
+    materials_dir: &Path,
     output_dir: &Path,
     options: ModelExportOptions,
 ) -> Result<ModelReport, String> {
@@ -166,7 +166,7 @@ pub fn export_models(
     } = options;
     let download_dir = absolute_path(download_dir)?;
     let mesh_dir = absolute_path(mesh_dir)?;
-    let assets_dir = absolute_path(assets_dir)?;
+    let materials_dir = absolute_path(materials_dir)?;
     let output_dir = absolute_path(output_dir)?;
     fs::create_dir_all(&mesh_dir).map_err(|error| {
         format!(
@@ -282,7 +282,7 @@ pub fn export_models(
         let dependencies = source_dependencies(
             &models,
             &download_dir,
-            &assets_dir,
+            &materials_dir,
             includes_materials,
             &mut fingerprints,
         )?;
@@ -302,7 +302,7 @@ pub fn export_models(
                 studs_per_tile,
                 ModelFingerprintContext {
                     download_dir: &download_dir,
-                    assets_dir: &assets_dir,
+                    materials_dir: &materials_dir,
                     includes_materials,
                     fingerprints: &mut fingerprints,
                 },
@@ -340,7 +340,7 @@ pub fn export_models(
             let gltf = match gltf::model_to_gltf(
                 &model_asset,
                 &download_dir,
-                &assets_dir,
+                &materials_dir,
                 &output_dir,
                 output_dir.parent().unwrap_or(&output_dir),
                 &buffer_output_path,
@@ -496,7 +496,7 @@ fn model_fingerprint(
     for path in model_dependency_paths(
         model,
         context.download_dir,
-        context.assets_dir,
+        context.materials_dir,
         context.includes_materials,
     ) {
         hasher.update(cache_path(&path).as_bytes());
@@ -506,7 +506,7 @@ fn model_fingerprint(
 }
 
 fn model_output_stem(model_hash: &str, includes_materials: bool) -> String {
-    let prefix = if includes_materials { "" } else { "NM" };
+    let prefix = if includes_materials { "M" } else { "" };
     format!("{prefix}{model_hash}")
 }
 
@@ -622,7 +622,7 @@ fn reusable_source_models(
 fn source_dependencies(
     models: &[ModelAsset],
     download_dir: &Path,
-    assets_dir: &Path,
+    materials_dir: &Path,
     includes_materials: bool,
     fingerprints: &mut FingerprintState,
 ) -> Result<BTreeMap<String, String>, String> {
@@ -631,7 +631,7 @@ fn source_dependencies(
         paths.extend(model_dependency_paths(
             model,
             download_dir,
-            assets_dir,
+            materials_dir,
             includes_materials,
         ));
     }
@@ -648,7 +648,7 @@ fn source_dependencies(
 fn model_dependency_paths(
     model: &ModelAsset,
     download_dir: &Path,
-    assets_dir: &Path,
+    materials_dir: &Path,
     includes_materials: bool,
 ) -> Vec<PathBuf> {
     let mut paths = HashSet::new();
@@ -659,9 +659,8 @@ fn model_dependency_paths(
     }
     if includes_materials {
         for primitive in &model.primitives {
-            let material_dir = assets_dir.join("material");
-            paths.insert(material_dir.join(format!("{}_color.png", primitive.material.name)));
-            paths.insert(material_dir.join(format!("{}_normal.png", primitive.material.name)));
+            paths.insert(materials_dir.join(format!("{}_color.png", primitive.material.name)));
+            paths.insert(materials_dir.join(format!("{}_normal.png", primitive.material.name)));
         }
     }
     let mut paths = paths.into_iter().collect::<Vec<_>>();
@@ -676,7 +675,7 @@ struct FingerprintState {
 
 struct ModelFingerprintContext<'a> {
     download_dir: &'a Path,
-    assets_dir: &'a Path,
+    materials_dir: &'a Path,
     includes_materials: bool,
     fingerprints: &'a mut FingerprintState,
 }
@@ -763,6 +762,12 @@ impl FingerprintState {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn material_output_stems_are_prefixed() {
+        assert_eq!(model_output_stem("hash", true), "Mhash");
+        assert_eq!(model_output_stem("hash", false), "hash");
+    }
 
     #[test]
     fn reuses_a_source_independently_of_other_manifest_sources() {

@@ -13,7 +13,7 @@ use std::{
 pub(crate) fn model_to_gltf(
     model: &ModelAsset,
     download_dir: &Path,
-    assets_dir: &Path,
+    materials_dir: &Path,
     gltf_output_dir: &Path,
     asset_output_dir: &Path,
     buffer_output_path: &Path,
@@ -37,7 +37,7 @@ pub(crate) fn model_to_gltf(
     let mut image_indices = HashMap::<PathBuf, usize>::new();
     let mut material_export = MaterialExport {
         download_dir,
-        assets_dir,
+        materials_dir,
         gltf_output_dir,
         asset_output_dir,
         material_indices: &mut material_indices,
@@ -350,7 +350,7 @@ fn write_binary_buffer(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 struct MaterialExport<'a> {
     download_dir: &'a Path,
-    assets_dir: &'a Path,
+    materials_dir: &'a Path,
     gltf_output_dir: &'a Path,
     asset_output_dir: &'a Path,
     material_indices: &'a mut HashMap<String, usize>,
@@ -426,7 +426,7 @@ impl MaterialExport<'_> {
         };
         let asset_path =
             asset_id.map(|asset_id| self.download_dir.join(asset_id).join("asset.bin"));
-        let fallback_path = self.assets_dir.join("material").join(fallback_name);
+        let fallback_path = self.materials_dir.join(fallback_name);
         let source_path = asset_path
             .filter(|path| path.is_file())
             .or_else(|| fallback_path.is_file().then_some(fallback_path));
@@ -443,7 +443,7 @@ impl MaterialExport<'_> {
         let Some(mime_type) = image_mime_type(&bytes) else {
             return Ok(None);
         };
-        let output_path = stage_asset(&source_path, self.assets_dir, self.asset_output_dir)?;
+        let output_path = stage_asset(&source_path, self.materials_dir, self.asset_output_dir)?;
         let uri = relative_uri(self.gltf_output_dir, &output_path)?;
         let image_index = self.images.len();
         self.images.push(json!({
@@ -461,10 +461,10 @@ impl MaterialExport<'_> {
 
 fn stage_asset(
     source_path: &Path,
-    assets_dir: &Path,
+    materials_dir: &Path,
     output_dir: &Path,
 ) -> Result<PathBuf, String> {
-    let Ok(relative_path) = source_path.strip_prefix(assets_dir) else {
+    let Ok(relative_path) = source_path.strip_prefix(materials_dir) else {
         return Ok(source_path.to_owned());
     };
     let output_path = output_dir.join(relative_path);
@@ -629,14 +629,14 @@ mod tests {
                 .as_nanos()
         ));
         let model_dir = root.join("model");
-        let assets_dir = root.join("assets");
+        let materials_dir = root.join("materials");
         let buffer_path = root.join("bin").join("triangle.bin");
         fs::create_dir_all(&model_dir).unwrap();
-        let image_path = assets_dir.join("material").join("Plastic_color.png");
+        let image_path = materials_dir.join("Plastic_color.png");
         fs::create_dir_all(image_path.parent().unwrap()).unwrap();
         fs::write(&image_path, b"\x89PNG\r\n\x1a\n").unwrap();
         fs::write(
-            assets_dir.join("material").join("Plastic_normal.png"),
+            materials_dir.join("Plastic_normal.png"),
             b"\x89PNG\r\n\x1a\n",
         )
         .unwrap();
@@ -693,7 +693,7 @@ mod tests {
         let gltf = model_to_gltf(
             &model,
             &root.join("download"),
-            &assets_dir,
+            &materials_dir,
             &model_dir,
             &root,
             &buffer_path,
@@ -739,7 +739,7 @@ mod tests {
         let no_material_gltf = model_to_gltf(
             &model,
             &root.join("download"),
-            &assets_dir,
+            &materials_dir,
             &model_dir,
             &root,
             &no_material_buffer_path,
@@ -783,7 +783,7 @@ mod tests {
         let neon_gltf = model_to_gltf(
             &model,
             &root.join("download"),
-            &assets_dir,
+            &materials_dir,
             &model_dir,
             &root,
             &neon_buffer_path,

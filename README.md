@@ -13,7 +13,7 @@ Export a directory and also create GLB files:
 ```sh
 roform path/to/place.rbxlx \
   --out-dir build/roform \
-  --assets-dir assets \
+  --materials-dir assets/material \
   --glb
 ```
 
@@ -26,8 +26,8 @@ roform/
 ├── download/                 # Downloaded Roblox assets
 ├── mesh/                     # Decoded mesh cache
 ├── model/                    # GLTF documents
-│   ├── <hash>.gltf           # GLTF with materials
-│   ├── NM<hash>.gltf         # GLTF without materials if --no-materials is used
+│   ├── M<hash>.gltf          # GLTF with materials if --materials-dir is used
+│   ├── <hash>.gltf           # GLTF without materials when --materials-dir is omitted
 │   └── manifest.json         # Source and output mapping
 ├── bin/                      # GLTF binary buffers
 └── glb/                      # Created only when --glb is used
@@ -44,7 +44,7 @@ fn export() -> Result<(), String> {
         Path::new("place.rbxmx"),
         Path::new("roform/download"),
         Path::new("roform/mesh"),
-        Path::new("assets"),
+        Path::new("assets/material"),
         Path::new("roform/model"),
         ModelExportOptions::default(),
     )?;

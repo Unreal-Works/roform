@@ -1,4 +1,4 @@
-use clap::{ArgAction, Parser};
+use clap::Parser;
 use mhif::{DownloadOptions, download_assets, extract_asset_ids_cached};
 use roform::{ModelExportOptions, export_glbs, export_models};
 use std::{path::PathBuf, process::ExitCode};
@@ -16,8 +16,12 @@ struct Cli {
     input: PathBuf,
     #[arg(long, value_name = "DIRECTORY", default_value_os_t = default_output_dir())]
     out_dir: PathBuf,
-    #[arg(long, value_name = "DIRECTORY", default_value_os_t = default_assets_dir())]
-    assets_dir: PathBuf,
+    #[arg(
+        long,
+        value_name = "DIRECTORY",
+        help = "Directory containing fallback material images; enables materials"
+    )]
+    materials_dir: Option<PathBuf>,
     #[arg(long, help = "Also package each exported GLTF as a GLB file")]
     glb: bool,
     #[arg(
@@ -25,13 +29,6 @@ struct Cli {
         help = "Ignore cached model outputs and re-export GLTF and GLB files"
     )]
     recompile: bool,
-    #[arg(
-        long = "no-materials",
-        default_value_t = true,
-        action = ArgAction::SetFalse,
-        help = "Do not assign materials to exported geometry"
-    )]
-    materials: bool,
     #[arg(
         long,
         value_name = "STUDS",
@@ -47,21 +44,14 @@ fn default_output_dir() -> PathBuf {
         .join("roform")
 }
 
-fn default_assets_dir() -> PathBuf {
-    std::env::current_dir()
-        .expect("failed to determine the current working directory")
-        .join("assets")
-}
-
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(
         cli.input,
         cli.out_dir,
-        cli.assets_dir,
+        cli.materials_dir,
         cli.glb,
         cli.recompile,
-        cli.materials,
         cli.studs_per_tile,
     ) {
         Ok(()) => ExitCode::SUCCESS,
@@ -75,16 +65,17 @@ fn main() -> ExitCode {
 fn run(
     input: PathBuf,
     out_dir: PathBuf,
-    assets_dir: PathBuf,
+    materials_dir: Option<PathBuf>,
     glb: bool,
     recompile: bool,
-    materials: bool,
     studs_per_tile: f32,
 ) -> Result<(), String> {
     if !studs_per_tile.is_finite() || studs_per_tile <= 0.0 {
         return Err("--studs-per-tile must be finite and greater than zero".to_owned());
     }
 
+    let includes_materials = materials_dir.is_some();
+    let materials_dir = materials_dir.unwrap_or_default();
     let download_start_time = std::time::Instant::now();
     let download_out_dir = out_dir.join("download");
     let extraction =
@@ -111,11 +102,11 @@ fn run(
         &input,
         &download_out_dir,
         &out_dir.join("mesh"),
-        &assets_dir,
+        &materials_dir,
         &out_dir.join("model"),
         ModelExportOptions {
             studs_per_tile,
-            includes_materials: materials,
+            includes_materials,
             recompile,
         },
     )?;
@@ -155,13 +146,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn materials_are_enabled_by_default_and_disabled_by_flag() {
-        let default_cli = Cli::try_parse_from(["roform", "input.rbxmx"]).unwrap();
-        assert!(default_cli.materials);
+    fn materials_are_enabled_only_when_a_directory_is_provided() {
+        let no_materials_cli = Cli::try_parse_from(["roform", "input.rbxmx"]).unwrap();
+        assert!(no_materials_cli.materials_dir.is_none());
 
-        let no_materials_cli =
-            Cli::try_parse_from(["roform", "input.rbxmx", "--no-materials"]).unwrap();
-        assert!(!no_materials_cli.materials);
+        let materials_cli =
+            Cli::try_parse_from(["roform", "input.rbxmx", "--materials-dir", "materials"]).unwrap();
+        assert_eq!(
+            materials_cli.materials_dir,
+            Some(PathBuf::from("materials"))
+        );
+
+        assert!(Cli::try_parse_from(["roform", "input.rbxmx", "--assets-dir", "assets"]).is_err());
+        assert!(Cli::try_parse_from(["roform", "input.rbxmx", "--materials"]).is_err());
+        assert!(Cli::try_parse_from(["roform", "input.rbxmx", "--no-materials"]).is_err());
 
         let recompile_cli = Cli::try_parse_from(["roform", "input.rbxmx", "--recompile"]).unwrap();
         assert!(recompile_cli.recompile);
