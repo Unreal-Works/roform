@@ -1,0 +1,22 @@
+{
+  "name": "@unrealworks/roform-linux-x64",
+  "version": "0.0.0",
+  "description": "Linux x64 binary for roform",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Unreal-Works/roform.git"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "bin"
+  ]
+}

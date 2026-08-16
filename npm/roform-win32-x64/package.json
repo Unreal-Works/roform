@@ -1,0 +1,22 @@
+{
+  "name": "@unrealworks/roform-win32-x64",
+  "version": "0.0.0",
+  "description": "Windows x64 binary for roform",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Unreal-Works/roform.git"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "bin"
+  ]
+}

@@ -1,0 +1,105 @@
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            package: roform-win32-x64
+            binary: roform.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            package: roform-win32-arm64
+            binary: roform.exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            package: roform-linux-x64
+            binary: roform
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            package: roform-linux-arm64
+            binary: roform
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            package: roform-darwin-x64
+            binary: roform
+          - os: macos-15
+            target: aarch64-apple-darwin
+            package: roform-darwin-arm64
+            binary: roform
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build native binary
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Stage native binary
+        shell: bash
+        run: |
+          mkdir -p "npm/${{ matrix.package }}/bin"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "npm/${{ matrix.package }}/bin/${{ matrix.binary }}"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.package }}
+          path: npm/${{ matrix.package }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Ensure npm supports trusted publishing
+        run: npm --version
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+      - name: Assemble npm packages
+        shell: bash
+        run: |
+          for package in npm/roform-*/; do
+            package_name="$(basename "$package")"
+            cp -R "artifacts/$package_name/." "$package"
+          done
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+
+          const rootPackage = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const packageDirectories = fs
+            .readdirSync("npm", { withFileTypes: true })
+            .filter((entry) => entry.isDirectory() && entry.name.startsWith("roform-"));
+          const packageVersions = packageDirectories.map((entry) => {
+            const packagePath = `npm/${entry.name}/package.json`;
+            return [packagePath, JSON.parse(fs.readFileSync(packagePath, "utf8"))];
+          });
+
+          for (const [packagePath, packageJson] of packageVersions) {
+            if (packageJson.version !== rootPackage.version) {
+              throw new Error(`${packagePath} is version ${packageJson.version}, expected ${rootPackage.version}`);
+            }
+          }
+          NODE
+          chmod +x npm/roform-*/bin/roform
+      - name: Publish platform packages
+        shell: bash
+        run: |
+          for package in npm/roform-*/; do
+            npm publish "$package"
+          done
+      - name: Publish wrapper package
+        run: npm publish
