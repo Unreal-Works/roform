@@ -274,7 +274,8 @@ fn parse_model(
             asset_ids.push(asset_id.clone());
         }
 
-        if let Some(mesh) = mesh {
+        if let Some(mut mesh) = mesh {
+            apply_meshpart_material_uvs(&mut mesh, instance, &material, matrix, studs_per_tile);
             primitives.push(ModelPrimitive {
                 name: instance.name.clone(),
                 mesh,
@@ -422,6 +423,18 @@ fn scale_mesh_to_size(mesh: &mut UnionMesh, target_size: Vector3, source_size: V
             inverse_scale(vertex.normal[1], scale[1]),
             inverse_scale(vertex.normal[2], scale[2]),
         ]);
+    }
+}
+
+fn apply_meshpart_material_uvs(
+    mesh: &mut UnionMesh,
+    instance: &Instance,
+    material: &ModelMaterial,
+    matrix: [f32; 16],
+    studs_per_tile: f32,
+) {
+    if instance.class.as_str() == "MeshPart" && material.base_color_asset.is_none() {
+        geometry::project_flat_mesh_uvs(mesh, matrix, studs_per_tile);
     }
 }
 
@@ -627,5 +640,83 @@ mod tests {
 
         assert_eq!(mesh.vertices.len(), 18);
         assert_eq!(mesh.indices.len(), 24);
+    }
+
+    #[test]
+    fn projects_uvs_for_untextured_mesh_parts() {
+        let dom = WeakDom::new(InstanceBuilder::new("MeshPart"));
+        let mut mesh = UnionMesh {
+            vertices: vec![
+                UnionVertex {
+                    position: [0.0, 0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    tex_coord: [9.0, 9.0],
+                    color: [255; 4],
+                },
+                UnionVertex {
+                    position: [2.0, 0.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    tex_coord: [9.0, 9.0],
+                    color: [255; 4],
+                },
+                UnionVertex {
+                    position: [0.0, 2.0, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    tex_coord: [9.0, 9.0],
+                    color: [255; 4],
+                },
+            ],
+            indices: vec![0, 1, 2],
+        };
+        let material = ModelMaterial {
+            name: "grass".to_owned(),
+            color: [1.0; 4],
+            base_color_asset: None,
+            normal_asset: None,
+        };
+        apply_meshpart_material_uvs(
+            &mut mesh,
+            dom.root(),
+            &material,
+            [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+            2.0,
+        );
+
+        assert_eq!(mesh.vertices[0].tex_coord, [0.0, 0.0]);
+        assert_eq!(mesh.vertices[1].tex_coord, [1.0, 0.0]);
+        assert_eq!(mesh.vertices[2].tex_coord, [0.0, 1.0]);
+    }
+
+    #[test]
+    fn preserves_uvs_for_textured_mesh_parts() {
+        let dom = WeakDom::new(InstanceBuilder::new("MeshPart"));
+        let mut mesh = UnionMesh {
+            vertices: vec![UnionVertex {
+                position: [0.0, 0.0, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                tex_coord: [9.0, 9.0],
+                color: [255; 4],
+            }],
+            indices: Vec::new(),
+        };
+        let material = ModelMaterial {
+            name: "grass".to_owned(),
+            color: [1.0; 4],
+            base_color_asset: Some("123".to_owned()),
+            normal_asset: None,
+        };
+        apply_meshpart_material_uvs(
+            &mut mesh,
+            dom.root(),
+            &material,
+            [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+            2.0,
+        );
+
+        assert_eq!(mesh.vertices[0].tex_coord, [9.0, 9.0]);
     }
 }
