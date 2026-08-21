@@ -1,0 +1,17 @@
+[tools]
+"github:Unreal-Works/cmdshim" = "0.3.0"
+node = "latest"
+rust = "latest"
+
+[env]
+_.path = { path = ["{{ exec(command='cmdshim path') }}"], tools = true }
+
+[_.cmdshim.roform]
+run = [
+    "cargo",
+    "run",
+    "--quiet",
+    "--manifest-path",
+    "{{config_root}}/Cargo.toml",
+    "--",
+]
