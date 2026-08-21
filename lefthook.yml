@@ -1,0 +1,11 @@
+pre-commit:
+  parallel: true
+  commands:
+    oxfmt:
+      glob: "*.{js,jsx,ts,tsx,json,css,scss,md,toml,yml,yaml}"
+      run: mise exec -- oxfmt --write {staged_files}
+      stage_fixed: true
+    rustfmt:
+      glob: "*.rs"
+      run: mise exec -- cargo fmt --all
+      stage_fixed: true

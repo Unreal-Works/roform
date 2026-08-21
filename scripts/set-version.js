@@ -23,8 +23,7 @@ function writeJson(path, value) {
 
 const cargoTomlPath = join(repositoryRoot, "Cargo.toml");
 const cargoToml = readFileSync(cargoTomlPath, "utf8");
-const cargoTomlPattern =
-  /(\[package\]\r?\nname = "roform"\r?\nversion = ")[^"]+(")/;
+const cargoTomlPattern = /(\[package\]\r?\nname = "roform"\r?\nversion = ")[^"]+(")/;
 
 if (!cargoTomlPattern.test(cargoToml)) {
   throw new Error("Could not find the package version in Cargo.toml");
@@ -35,8 +34,7 @@ writeFileSync(cargoTomlPath, updatedCargoToml);
 
 const cargoLockPath = join(repositoryRoot, "Cargo.lock");
 const cargoLock = readFileSync(cargoLockPath, "utf8");
-const cargoLockPattern =
-  /(\[\[package\]\]\r?\nname = "roform"\r?\nversion = ")[^"]+(")/;
+const cargoLockPattern = /(\[\[package\]\]\r?\nname = "roform"\r?\nversion = ")[^"]+(")/;
 
 if (!cargoLockPattern.test(cargoLock)) {
   throw new Error('Could not find the local "roform" package in Cargo.lock');
@@ -49,13 +47,8 @@ const rootPackagePath = join(repositoryRoot, "package.json");
 const rootPackage = readJson(rootPackagePath);
 rootPackage.version = version;
 
-for (const [name, dependencyVersion] of Object.entries(
-  rootPackage.optionalDependencies ?? {},
-)) {
-  if (
-    name.startsWith("@unrealworks/roform-") &&
-    dependencyVersion !== version
-  ) {
+for (const [name, dependencyVersion] of Object.entries(rootPackage.optionalDependencies ?? {})) {
+  if (name.startsWith("@unrealworks/roform-") && dependencyVersion !== version) {
     rootPackage.optionalDependencies[name] = version;
   }
 }
@@ -67,12 +60,7 @@ const platformPackageDirectories = readdirSync(join(repositoryRoot, "npm"), {
 }).filter((entry) => entry.isDirectory() && entry.name.startsWith("roform-"));
 
 for (const directory of platformPackageDirectories) {
-  const packagePath = join(
-    repositoryRoot,
-    "npm",
-    directory.name,
-    "package.json",
-  );
+  const packagePath = join(repositoryRoot, "npm", directory.name, "package.json");
   const packageJson = readJson(packagePath);
   packageJson.version = version;
   writeJson(packagePath, packageJson);

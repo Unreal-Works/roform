@@ -1,17 +1,15 @@
 [tools]
+"github:oxc-project/oxc" = { version = "latest", matching = "oxfmt" }
 "github:Unreal-Works/cmdshim" = "0.3.0"
+lefthook = "latest"
 node = "latest"
 rust = "latest"
+
+[hooks]
+postinstall = ["lefthook install"]
 
 [env]
 _.path = { path = ["{{ exec(command='cmdshim path') }}"], tools = true }
 
 [_.cmdshim.roform]
-run = [
-    "cargo",
-    "run",
-    "--quiet",
-    "--manifest-path",
-    "{{config_root}}/Cargo.toml",
-    "--",
-]
+run = ["cargo", "run", "--quiet", "--manifest-path", "{{config_root}}/Cargo.toml", "--"]

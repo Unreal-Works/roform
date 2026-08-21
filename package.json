@@ -15,11 +15,14 @@
     "LICENSE",
     "README.md"
   ],
-  "engines": {
-    "node": ">=18"
-  },
   "publishConfig": {
     "access": "public"
+  },
+  "scripts": {
+    "build": "cargo build --release",
+    "lint": "cargo clippy --all-targets --all-features -- -D warnings",
+    "set-version": "bun scripts/set-version.js",
+    "test": "cargo test"
   },
   "optionalDependencies": {
     "@unrealworks/roform-darwin-arm64": "0.1.1",
@@ -29,10 +32,7 @@
     "@unrealworks/roform-win32-arm64": "0.1.1",
     "@unrealworks/roform-win32-x64": "0.1.1"
   },
-  "scripts": {
-    "build": "cargo build --release",
-    "lint": "cargo clippy --all-targets --all-features -- -D warnings",
-    "set-version": "bun scripts/set-version.js",
-    "test": "cargo test"
+  "engines": {
+    "node": ">=18"
   }
 }
