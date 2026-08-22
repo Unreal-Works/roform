@@ -977,9 +977,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mhif"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "285dc62c22ac13d1848f7ee56943fe011d1a4f41100553c1fe9defb6ad87c640"
+checksum = "7cce5de977ae2fb3f2523793637bd875081b6e080b0cb4d6a79e39cbb4a111ec"
 dependencies = [
  "blake3",
  "rbx_binary",
