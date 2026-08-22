@@ -722,6 +722,7 @@ fn process_model_source(
             includes_materials,
         ) {
             Ok(gltf) => gltf,
+            Err(error) if error == gltf::NO_RENDERABLE_GEOMETRY => continue,
             Err(error) => {
                 result.failed.push(ModelFailure {
                     source: format!("{} / {}", source_path.display(), model_asset.name),
@@ -1232,6 +1233,45 @@ mod tests {
     fn material_output_stems_are_prefixed() {
         assert_eq!(model_output_stem("hash", true), "Mhash");
         assert_eq!(model_output_stem("hash", false), "hash");
+    }
+
+    #[test]
+    fn ignores_models_without_renderable_geometry() {
+        let root = std::env::temp_dir().join(format!(
+            "roform-pipeline-empty-model-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let input = root.join("animation.rbxmx");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &input,
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/fixtures/ANIMATION - Jump.rbxmx"
+            )),
+        )
+        .unwrap();
+
+        let report = export_models_with_jobs(
+            &input,
+            &root.join("download"),
+            &root.join("mesh"),
+            &root.join("assets"),
+            &root.join("model"),
+            ModelExportOptions::default(),
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(report.exported, 0);
+        assert_eq!(report.cached, 0);
+        assert!(report.failed.is_empty());
+        assert!(report.models.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

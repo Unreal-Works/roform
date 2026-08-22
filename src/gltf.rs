@@ -10,6 +10,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) const NO_RENDERABLE_GEOMETRY: &str = "model contains no renderable geometry";
+
 pub(crate) fn model_to_gltf(
     model: &ModelAsset,
     download_dir: &Path,
@@ -20,7 +22,7 @@ pub(crate) fn model_to_gltf(
     include_textures: bool,
 ) -> Result<Vec<u8>, String> {
     if model.primitives.is_empty() {
-        return Err("model contains no renderable geometry".to_owned());
+        return Err(NO_RENDERABLE_GEOMETRY.to_owned());
     }
 
     let vertex_stride = 36usize;

@@ -10,6 +10,7 @@ Please update this document after any relevant changes.
 - The public `export_meshes_with_jobs`, `export_models_with_jobs`, and `export_glbs_with_jobs` APIs expose explicit compile worker limits; the original export APIs use the host's available parallelism. Mesh asset IDs are deduplicated before threaded cache writes, and model/GLB output paths are locked independently.
 - Including `glb` in `--compile` packages each successful model GLTF, including its buffer and textures, below `roform/glb/<hash>.glb` or `roform/glb/M<hash>.glb` after GLTF export.
 - Passing `--recompile` bypasses cached model and GLB outputs while retaining cached downloads and decoded meshes.
+- Models with no renderable geometry are skipped without being reported as export failures.
 - Materials are enabled only when `--materials-dir` is provided. Without it, exports retain part colors and transparency but omit material images, samplers, and texture assignments.
 - Imported `MeshPart`, `UnionOperation`, and `IntersectOperation` instances recolor decoded geometry from `Color` only when `UsePartColor` is enabled; enabled part color clears authored RGB vertex tint while preserving vertex alpha, and disabled part color leaves decoded mesh colors intact. CSG operations default to disabled, while mesh parts retain their tint when the legacy flag is absent.
 - MeshParts without an explicit `TextureID` or `SurfaceAppearance.ColorMap` use model-space physical UV projection for fallback material textures; explicitly textured MeshParts preserve their authored mesh UVs.
