@@ -1,6 +1,8 @@
 use clap::{Parser, ValueEnum};
-use mhif::{DownloadOptions, download_assets, extract_asset_ids_cached};
-use roform::{ModelExportOptions, export_glbs, export_meshes, export_models};
+use mhif::{DEFAULT_DOWNLOAD_JOBS, DownloadOptions, download_assets, extract_asset_ids_cached};
+use roform::{
+    ModelExportOptions, export_glbs_with_jobs, export_meshes_with_jobs, export_models_with_jobs,
+};
 use std::{path::PathBuf, process::ExitCode};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -69,6 +71,13 @@ struct Cli {
     recompile: bool,
     #[arg(
         long,
+        value_name = "N",
+        default_value_t = DEFAULT_DOWNLOAD_JOBS,
+        help = "Maximum number of concurrent downloads and compile workers"
+    )]
+    jobs: usize,
+    #[arg(
+        long,
         value_name = "STUDS",
         default_value_t = 2.0,
         help = "Physical studs represented by one texture tile"
@@ -91,6 +100,7 @@ fn main() -> ExitCode {
         cli.materials_dir,
         cli.recompile,
         cli.studs_per_tile,
+        cli.jobs,
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -107,6 +117,7 @@ fn run(
     materials_dir: Option<PathBuf>,
     recompile: bool,
     studs_per_tile: f32,
+    jobs: usize,
 ) -> Result<(), String> {
     if !studs_per_tile.is_finite() || studs_per_tile <= 0.0 {
         return Err("--studs-per-tile must be finite and greater than zero".to_owned());
@@ -120,7 +131,7 @@ fn run(
         extract_asset_ids_cached(&input, &download_out_dir).map_err(|error| error.to_string())?;
     let download_report = download_assets(
         &extraction.asset_ids,
-        &DownloadOptions::new(&download_out_dir),
+        &DownloadOptions::new(&download_out_dir).with_jobs(jobs),
     )
     .map_err(|error| error.to_string())?;
     for failure in &download_report.failed {
@@ -137,7 +148,8 @@ fn run(
 
     if compile.mesh {
         let mesh_start_time = std::time::Instant::now();
-        let mesh_report = export_meshes(&input, &download_out_dir, &out_dir.join("mesh"))?;
+        let mesh_report =
+            export_meshes_with_jobs(&input, &download_out_dir, &out_dir.join("mesh"), jobs)?;
         for failure in &mesh_report.failed {
             eprintln!("failed mesh {}: {}", failure.source, failure.error);
         }
@@ -153,7 +165,7 @@ fn run(
 
     let model_report = if compile.model {
         let model_start_time = std::time::Instant::now();
-        let model_report = export_models(
+        let model_report = export_models_with_jobs(
             &input,
             &download_out_dir,
             &out_dir.join("mesh"),
@@ -164,6 +176,7 @@ fn run(
                 includes_materials,
                 recompile,
             },
+            jobs,
         )?;
         for failure in &model_report.failed {
             eprintln!("failed model {}: {}", failure.source, failure.error);
@@ -186,7 +199,8 @@ fn run(
         let models = model_report
             .as_ref()
             .ok_or_else(|| "GLB compilation requires model compilation".to_owned())?;
-        let glb_report = export_glbs(&models.models, &out_dir.join("glb"), recompile)?;
+        let glb_report =
+            export_glbs_with_jobs(&models.models, &out_dir.join("glb"), recompile, jobs)?;
         println!(
             "glb: exported {}, reused {}, failed {} -> {} in {:.2}s",
             glb_report.exported,
@@ -227,6 +241,7 @@ mod tests {
         assert!(recompile_cli.recompile);
 
         let default_cli = Cli::try_parse_from(["roform", "input.rbxmx"]).unwrap();
+        assert_eq!(default_cli.jobs, DEFAULT_DOWNLOAD_JOBS);
         assert_eq!(
             compile_plan(&default_cli.compile, default_cli.no_compile),
             CompilePlan {
@@ -235,6 +250,9 @@ mod tests {
                 glb: false,
             }
         );
+
+        let jobs_cli = Cli::try_parse_from(["roform", "input.rbxmx", "--jobs", "8"]).unwrap();
+        assert_eq!(jobs_cli.jobs, 8);
 
         let mesh_cli = Cli::try_parse_from(["roform", "input.rbxmx", "--compile", "mesh"]).unwrap();
         assert_eq!(

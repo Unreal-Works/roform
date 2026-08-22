@@ -7,6 +7,8 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    thread,
     time::UNIX_EPOCH,
 };
 
@@ -119,7 +121,7 @@ struct ModelSourceManifestEntry {
     dependencies: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct FingerprintCache {
     version: u32,
     files: HashMap<String, FingerprintCacheEntry>,
@@ -130,6 +132,52 @@ struct FingerprintCacheEntry {
     length: u64,
     modified_nanos: Option<u128>,
     hash: String,
+}
+
+struct MeshSourceWork {
+    source_path: PathBuf,
+    source: String,
+    source_hash: String,
+    mesh_ids: Vec<String>,
+}
+
+struct MeshAssetResult {
+    asset_id: String,
+    result: Result<(String, bool), String>,
+}
+
+struct ModelSourceResult {
+    fingerprints: FingerprintState,
+    manifest_source: Option<ModelSourceManifestEntry>,
+    manifest_dependencies: BTreeMap<String, String>,
+    manifest_entries: Vec<ModelManifestEntry>,
+    models: Vec<ModelManifestEntry>,
+    exported: usize,
+    cached: usize,
+    failed: Vec<ModelFailure>,
+    fatal: Option<String>,
+}
+
+enum GlbItemResult {
+    Exported,
+    Cached,
+    Failed(ModelFailure),
+}
+
+#[derive(Default)]
+struct OutputLocks {
+    locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
+}
+
+impl OutputLocks {
+    fn for_path(&self, path: &Path) -> Arc<Mutex<()>> {
+        let mut locks = self.locks.lock().expect("output lock map poisoned");
+        Arc::clone(
+            locks
+                .entry(path.to_owned())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
 }
 
 /// Options controlling model GLTF export.
@@ -178,6 +226,16 @@ pub fn export_meshes(
     download_dir: &Path,
     mesh_dir: &Path,
 ) -> Result<MeshReport, String> {
+    export_meshes_with_jobs(input, download_dir, mesh_dir, default_jobs())
+}
+
+/// Compile decoded mesh payloads using at most `jobs` OS threads.
+pub fn export_meshes_with_jobs(
+    input: &Path,
+    download_dir: &Path,
+    mesh_dir: &Path,
+    jobs: usize,
+) -> Result<MeshReport, String> {
     let download_dir = absolute_path(download_dir)?;
     let mesh_dir = absolute_path(mesh_dir)?;
     fs::create_dir_all(&mesh_dir).map_err(|error| {
@@ -214,16 +272,15 @@ pub fn export_meshes(
         output_directory: mesh_dir.to_owned(),
     };
 
-    for source_path in source_files {
+    let source_results = parallel_map(source_files, jobs, |source_path| {
         let source = cache_path(&source_path);
         let source_bytes = match fs::read(&source_path) {
             Ok(bytes) => bytes,
             Err(error) => {
-                report.failed.push(ModelFailure {
+                return Err(ModelFailure {
                     source: source_path.display().to_string(),
                     error: format!("failed to read source: {error}"),
                 });
-                continue;
             }
         };
         let source_hash = blake3::hash(&source_bytes).to_hex().to_string();
@@ -242,34 +299,77 @@ pub fn export_meshes(
             match model::mesh_asset_ids(&source_path) {
                 Ok(mesh_ids) => mesh_ids,
                 Err(error) => {
-                    report.failed.push(ModelFailure {
+                    return Err(ModelFailure {
                         source: source_path.display().to_string(),
                         error,
                     });
-                    continue;
                 }
             }
         };
+        Ok(MeshSourceWork {
+            source_path,
+            source,
+            source_hash,
+            mesh_ids,
+        })
+    })?;
 
+    let mut source_works = Vec::new();
+    let mut asset_ids = HashSet::new();
+    for source_result in source_results {
+        match source_result {
+            Ok(source_work) => {
+                asset_ids.extend(source_work.mesh_ids.iter().cloned());
+                source_works.push(source_work);
+            }
+            Err(failure) => report.failed.push(failure),
+        }
+    }
+
+    let mut asset_ids = asset_ids.into_iter().collect::<Vec<_>>();
+    asset_ids.sort();
+    let asset_results = parallel_map(asset_ids, jobs, |asset_id| MeshAssetResult {
+        result: model::cache_mesh_asset(&asset_id, &download_dir, &mesh_dir),
+        asset_id,
+    })?;
+    let asset_results = asset_results
+        .into_iter()
+        .map(|result| (result.asset_id, result.result))
+        .collect::<HashMap<_, _>>();
+
+    for source_work in source_works {
+        let MeshSourceWork {
+            source_path,
+            source,
+            source_hash,
+            mesh_ids,
+        } = source_work;
         let mut meshes = Vec::with_capacity(mesh_ids.len());
         let mut failed = false;
         for asset_id in mesh_ids {
-            match model::cache_mesh_asset(&asset_id, &download_dir, &mesh_dir) {
-                Ok((payload_hash, cached)) => {
-                    if cached {
+            match asset_results.get(&asset_id) {
+                Some(Ok((payload_hash, cached))) => {
+                    if *cached {
                         report.cached += 1;
                     } else {
                         report.decoded += 1;
                     }
                     meshes.push(MeshManifestEntry {
                         asset_id,
-                        payload_hash,
+                        payload_hash: payload_hash.clone(),
                     });
                 }
-                Err(error) => {
+                Some(Err(error)) => {
                     report.failed.push(ModelFailure {
                         source: format!("{} / {}", source_path.display(), asset_id),
-                        error,
+                        error: error.clone(),
+                    });
+                    failed = true;
+                }
+                None => {
+                    report.failed.push(ModelFailure {
+                        source: format!("{} / {}", source_path.display(), asset_id),
+                        error: "mesh worker did not return a result".to_owned(),
                     });
                     failed = true;
                 }
@@ -319,6 +419,27 @@ pub fn export_models(
     materials_dir: &Path,
     output_dir: &Path,
     options: ModelExportOptions,
+) -> Result<ModelReport, String> {
+    export_models_with_jobs(
+        input,
+        download_dir,
+        mesh_dir,
+        materials_dir,
+        output_dir,
+        options,
+        default_jobs(),
+    )
+}
+
+/// Export Roblox models using at most `jobs` OS threads.
+pub fn export_models_with_jobs(
+    input: &Path,
+    download_dir: &Path,
+    mesh_dir: &Path,
+    materials_dir: &Path,
+    output_dir: &Path,
+    options: ModelExportOptions,
+    jobs: usize,
 ) -> Result<ModelReport, String> {
     options.validate()?;
     let ModelExportOptions {
@@ -395,144 +516,40 @@ pub fn export_models(
         models: Vec::new(),
         output_directory: output_dir.to_owned(),
     };
-    for source_path in source_files {
-        let source = cache_path(&source_path);
-        if let Some(source_hash) = source_hashes.get(&source)
-            && let Some(previous_manifest) = &previous_manifest
-            && let Some((models, dependencies)) = reusable_source_models(
-                previous_manifest,
-                &source,
-                source_hash,
-                &mut fingerprints,
-                &output_dir,
-            )
-        {
-            manifest_dependencies.extend(dependencies.clone());
-            manifest_sources.push(ModelSourceManifestEntry {
-                source,
-                hash: source_hash.clone(),
-                dependencies: dependencies.keys().cloned().collect(),
-            });
-            report.cached += models.len();
-            manifest_entries.extend(models.iter().cloned());
-            report.models.extend(models);
-            continue;
-        }
-
-        let source_bytes = match fs::read(&source_path) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                report.failed.push(ModelFailure {
-                    source: source_path.display().to_string(),
-                    error: format!("failed to read source: {error}"),
-                });
-                continue;
-            }
-        };
-        let models =
-            match model::parse_models(&source_path, &download_dir, &mesh_dir, studs_per_tile) {
-                Ok(models) => models,
-                Err(error) => {
-                    report.failed.push(ModelFailure {
-                        source: source_path.display().to_string(),
-                        error,
-                    });
-                    continue;
-                }
-            };
-        let dependencies = source_dependencies(
-            &models,
+    let output_locks = OutputLocks::default();
+    let base_fingerprints = fingerprints.clone();
+    let source_results = parallel_map(source_files, jobs, |source_path| {
+        process_model_source(
+            source_path,
             &download_dir,
+            &mesh_dir,
             &materials_dir,
+            &output_dir,
+            &source_hashes,
+            previous_manifest.as_ref(),
+            studs_per_tile,
             includes_materials,
-            &mut fingerprints,
-        )?;
-        if let Some(source_hash) = source_hashes.get(&source) {
-            manifest_dependencies.extend(dependencies.clone());
-            manifest_sources.push(ModelSourceManifestEntry {
-                source: source.clone(),
-                hash: source_hash.clone(),
-                dependencies: dependencies.keys().cloned().collect(),
-            });
+            recompile,
+            base_fingerprints.clone(),
+            &output_locks,
+        )
+    })?;
+    for source_result in source_results {
+        if let Some(error) = source_result.fatal {
+            return Err(error);
         }
-        for (model_index, model_asset) in models.into_iter().enumerate() {
-            let model_hash = model_fingerprint(
-                &source_bytes,
-                &model_asset,
-                model_index,
-                studs_per_tile,
-                ModelFingerprintContext {
-                    download_dir: &download_dir,
-                    materials_dir: &materials_dir,
-                    includes_materials,
-                    fingerprints: &mut fingerprints,
-                },
-            )?;
-            let output_stem = model_output_stem(&model_hash, includes_materials);
-            let output_name = format!("{output_stem}.gltf");
-            let output_path = output_dir.join(&output_name);
-            let buffer_output_path = output_dir
-                .parent()
-                .unwrap_or(&output_dir)
-                .join("bin")
-                .join(format!("{output_stem}.bin"));
-
-            for warning in &model_asset.warnings {
-                eprintln!(
-                    "warning model {} in {}: {}",
-                    model_asset.name,
-                    source_path.display(),
-                    warning
-                );
-            }
-            if !recompile && output_path.is_file() && buffer_output_path.is_file() {
-                let manifest_entry = ModelManifestEntry {
-                    hash: model_hash,
-                    output: cache_path(&output_path),
-                    source: source.clone(),
-                    name: model_asset.name.clone(),
-                };
-                manifest_entries.push(manifest_entry.clone());
-                report.models.push(manifest_entry);
-                report.cached += 1;
-                continue;
-            }
-
-            let gltf = match gltf::model_to_gltf(
-                &model_asset,
-                &download_dir,
-                &materials_dir,
-                &output_dir,
-                output_dir.parent().unwrap_or(&output_dir),
-                &buffer_output_path,
-                includes_materials,
-            ) {
-                Ok(gltf) => gltf,
-                Err(error) => {
-                    report.failed.push(ModelFailure {
-                        source: format!("{} / {}", source_path.display(), model_asset.name),
-                        error,
-                    });
-                    continue;
-                }
-            };
-            if let Err(error) = fs::write(&output_path, gltf) {
-                report.failed.push(ModelFailure {
-                    source: format!("{} / {}", source_path.display(), model_asset.name),
-                    error: format!("failed to write {}: {error}", output_path.display()),
-                });
-                continue;
-            }
-            let manifest_entry = ModelManifestEntry {
-                hash: model_hash,
-                output: cache_path(&output_path),
-                source: source.clone(),
-                name: model_asset.name.clone(),
-            };
-            manifest_entries.push(manifest_entry.clone());
-            report.models.push(manifest_entry);
-            report.exported += 1;
+        fingerprints
+            .current
+            .extend(source_result.fingerprints.current);
+        if let Some(manifest_source) = source_result.manifest_source {
+            manifest_sources.push(manifest_source);
         }
+        manifest_dependencies.extend(source_result.manifest_dependencies);
+        manifest_entries.extend(source_result.manifest_entries);
+        report.models.extend(source_result.models);
+        report.exported += source_result.exported;
+        report.cached += source_result.cached;
+        report.failed.extend(source_result.failed);
     }
 
     let manifest = ModelManifest {
@@ -552,6 +569,188 @@ pub fn export_models(
     Ok(report)
 }
 
+fn process_model_source(
+    source_path: PathBuf,
+    download_dir: &Path,
+    mesh_dir: &Path,
+    materials_dir: &Path,
+    output_dir: &Path,
+    source_hashes: &HashMap<String, String>,
+    previous_manifest: Option<&ModelManifest>,
+    studs_per_tile: f32,
+    includes_materials: bool,
+    recompile: bool,
+    fingerprints: FingerprintState,
+    output_locks: &OutputLocks,
+) -> ModelSourceResult {
+    let source = cache_path(&source_path);
+    let source_hash = source_hashes.get(&source).cloned();
+    let mut result = ModelSourceResult {
+        fingerprints,
+        manifest_source: None,
+        manifest_dependencies: BTreeMap::new(),
+        manifest_entries: Vec::new(),
+        models: Vec::new(),
+        exported: 0,
+        cached: 0,
+        failed: Vec::new(),
+        fatal: None,
+    };
+
+    if let Some(source_hash) = source_hash.as_deref()
+        && let Some(previous_manifest) = previous_manifest
+        && let Some((models, dependencies)) = reusable_source_models(
+            previous_manifest,
+            &source,
+            source_hash,
+            &mut result.fingerprints,
+            output_dir,
+        )
+    {
+        result.manifest_dependencies = dependencies.clone();
+        result.manifest_source = Some(ModelSourceManifestEntry {
+            source,
+            hash: source_hash.to_owned(),
+            dependencies: dependencies.keys().cloned().collect(),
+        });
+        result.cached = models.len();
+        result.manifest_entries = models.clone();
+        result.models = models;
+        return result;
+    }
+
+    let source_bytes = match fs::read(&source_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            result.failed.push(ModelFailure {
+                source: source_path.display().to_string(),
+                error: format!("failed to read source: {error}"),
+            });
+            return result;
+        }
+    };
+    let models = match model::parse_models(&source_path, download_dir, mesh_dir, studs_per_tile) {
+        Ok(models) => models,
+        Err(error) => {
+            result.failed.push(ModelFailure {
+                source: source_path.display().to_string(),
+                error,
+            });
+            return result;
+        }
+    };
+    let dependencies = match source_dependencies(
+        &models,
+        download_dir,
+        materials_dir,
+        includes_materials,
+        &mut result.fingerprints,
+    ) {
+        Ok(dependencies) => dependencies,
+        Err(error) => {
+            result.fatal = Some(error);
+            return result;
+        }
+    };
+    if let Some(source_hash) = source_hash.as_deref() {
+        result.manifest_dependencies = dependencies.clone();
+        result.manifest_source = Some(ModelSourceManifestEntry {
+            source: source.clone(),
+            hash: source_hash.to_owned(),
+            dependencies: dependencies.keys().cloned().collect(),
+        });
+    }
+
+    for (model_index, model_asset) in models.into_iter().enumerate() {
+        let model_hash = match model_fingerprint(
+            &source_bytes,
+            &model_asset,
+            model_index,
+            studs_per_tile,
+            ModelFingerprintContext {
+                download_dir,
+                materials_dir,
+                includes_materials,
+                fingerprints: &mut result.fingerprints,
+            },
+        ) {
+            Ok(model_hash) => model_hash,
+            Err(error) => {
+                result.fatal = Some(error);
+                return result;
+            }
+        };
+        let output_stem = model_output_stem(&model_hash, includes_materials);
+        let output_path = output_dir.join(format!("{output_stem}.gltf"));
+        let buffer_output_path = output_dir
+            .parent()
+            .unwrap_or(output_dir)
+            .join("bin")
+            .join(format!("{output_stem}.bin"));
+
+        for warning in &model_asset.warnings {
+            eprintln!(
+                "warning model {} in {}: {}",
+                model_asset.name,
+                source_path.display(),
+                warning
+            );
+        }
+
+        let output_lock = output_locks.for_path(&output_path);
+        let _output_guard = output_lock.lock().expect("model output lock poisoned");
+        if !recompile && output_path.is_file() && buffer_output_path.is_file() {
+            let manifest_entry = ModelManifestEntry {
+                hash: model_hash,
+                output: cache_path(&output_path),
+                source: source.clone(),
+                name: model_asset.name.clone(),
+            };
+            result.manifest_entries.push(manifest_entry.clone());
+            result.models.push(manifest_entry);
+            result.cached += 1;
+            continue;
+        }
+
+        let gltf = match gltf::model_to_gltf(
+            &model_asset,
+            download_dir,
+            materials_dir,
+            output_dir,
+            output_dir.parent().unwrap_or(output_dir),
+            &buffer_output_path,
+            includes_materials,
+        ) {
+            Ok(gltf) => gltf,
+            Err(error) => {
+                result.failed.push(ModelFailure {
+                    source: format!("{} / {}", source_path.display(), model_asset.name),
+                    error,
+                });
+                continue;
+            }
+        };
+        if let Err(error) = fs::write(&output_path, gltf) {
+            result.failed.push(ModelFailure {
+                source: format!("{} / {}", source_path.display(), model_asset.name),
+                error: format!("failed to write {}: {error}", output_path.display()),
+            });
+            continue;
+        }
+        let manifest_entry = ModelManifestEntry {
+            hash: model_hash,
+            output: cache_path(&output_path),
+            source: source.clone(),
+            name: model_asset.name.clone(),
+        };
+        result.manifest_entries.push(manifest_entry.clone());
+        result.models.push(manifest_entry);
+        result.exported += 1;
+    }
+
+    result
+}
+
 /// Package model GLTF files as GLB files.
 ///
 /// Pass the [`ModelManifestEntry`] values returned in [`ModelReport::models`]
@@ -568,6 +767,16 @@ pub fn export_glbs(
     output_dir: &Path,
     recompile: bool,
 ) -> Result<GlbReport, String> {
+    export_glbs_with_jobs(models, output_dir, recompile, default_jobs())
+}
+
+/// Package model GLTF files as GLB files using at most `jobs` OS threads.
+pub fn export_glbs_with_jobs(
+    models: &[ModelManifestEntry],
+    output_dir: &Path,
+    recompile: bool,
+    jobs: usize,
+) -> Result<GlbReport, String> {
     let output_dir = absolute_path(output_dir)?;
     fs::create_dir_all(&output_dir).map_err(|error| {
         format!(
@@ -582,49 +791,110 @@ pub fn export_glbs(
         output_directory: output_dir.to_owned(),
     };
 
-    for model in models {
-        let output_stem = Path::new(&model.output)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .ok_or_else(|| format!("invalid GLTF output path: {}", model.output))?;
-        let output_path = output_dir.join(format!("{output_stem}.glb"));
-        if !recompile && output_path.is_file() {
-            report.cached += 1;
-            continue;
-        }
+    let output_locks = OutputLocks::default();
+    let results = parallel_map(
+        models.to_vec(),
+        jobs,
+        |model| -> Result<GlbItemResult, String> {
+            let output_stem = Path::new(&model.output)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| format!("invalid GLTF output path: {}", model.output))?
+                .to_owned();
+            let output_path = output_dir.join(format!("{output_stem}.glb"));
+            let output_lock = output_locks.for_path(&output_path);
+            let _output_guard = output_lock.lock().expect("GLB output lock poisoned");
+            if !recompile && output_path.is_file() {
+                return Ok(GlbItemResult::Cached);
+            }
 
-        let gltf_path = Path::new(&model.output);
-        let gltf = match fs::read(gltf_path) {
-            Ok(gltf) => gltf,
-            Err(error) => {
-                report.failed.push(ModelFailure {
+            let gltf_path = Path::new(&model.output);
+            let gltf = match fs::read(gltf_path) {
+                Ok(gltf) => gltf,
+                Err(error) => {
+                    return Ok(GlbItemResult::Failed(ModelFailure {
+                        source: model.source.clone(),
+                        error: format!("failed to read GLTF {}: {error}", gltf_path.display()),
+                    }));
+                }
+            };
+            let glb = match gltf::gltf_to_glb(&gltf, gltf_path) {
+                Ok(glb) => glb,
+                Err(error) => {
+                    return Ok(GlbItemResult::Failed(ModelFailure {
+                        source: model.source.clone(),
+                        error,
+                    }));
+                }
+            };
+            if let Err(error) = fs::write(&output_path, glb) {
+                return Ok(GlbItemResult::Failed(ModelFailure {
                     source: model.source.clone(),
-                    error: format!("failed to read GLTF {}: {error}", gltf_path.display()),
-                });
-                continue;
+                    error: format!("failed to write {}: {error}", output_path.display()),
+                }));
             }
-        };
-        let glb = match gltf::gltf_to_glb(&gltf, gltf_path) {
-            Ok(glb) => glb,
-            Err(error) => {
-                report.failed.push(ModelFailure {
-                    source: model.source.clone(),
-                    error,
-                });
-                continue;
-            }
-        };
-        if let Err(error) = fs::write(&output_path, glb) {
-            report.failed.push(ModelFailure {
-                source: model.source.clone(),
-                error: format!("failed to write {}: {error}", output_path.display()),
-            });
-            continue;
+            Ok(GlbItemResult::Exported)
+        },
+    )?;
+
+    for result in results {
+        match result? {
+            GlbItemResult::Exported => report.exported += 1,
+            GlbItemResult::Cached => report.cached += 1,
+            GlbItemResult::Failed(failure) => report.failed.push(failure),
         }
-        report.exported += 1;
     }
 
     Ok(report)
+}
+
+fn default_jobs() -> usize {
+    thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+}
+
+fn parallel_map<T, R, F>(items: Vec<T>, jobs: usize, function: F) -> Result<Vec<R>, String>
+where
+    T: Send,
+    R: Send,
+    F: Fn(T) -> R + Sync,
+{
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let worker_count = jobs.max(1).min(items.len());
+    let chunk_size = (items.len() + worker_count - 1) / worker_count;
+    let mut chunks = Vec::with_capacity(worker_count);
+    let mut chunk = Vec::with_capacity(chunk_size);
+    for item in items {
+        chunk.push(item);
+        if chunk.len() == chunk_size {
+            chunks.push(chunk);
+            chunk = Vec::with_capacity(chunk_size);
+        }
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+
+    thread::scope(|scope| {
+        let function = &function;
+        let handles = chunks
+            .into_iter()
+            .map(|chunk| scope.spawn(move || chunk.into_iter().map(function).collect::<Vec<_>>()))
+            .collect::<Vec<_>>();
+        let mut results = Vec::new();
+        for handle in handles {
+            results.extend(
+                handle
+                    .join()
+                    .map_err(|_| "compile worker thread panicked".to_owned())?,
+            );
+        }
+        Ok(results)
+    })
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf, String> {
@@ -862,6 +1132,7 @@ fn model_dependency_paths(
     paths
 }
 
+#[derive(Clone)]
 struct FingerprintState {
     previous: Option<FingerprintCache>,
     current: HashMap<String, FingerprintCacheEntry>,
@@ -961,6 +1232,14 @@ mod tests {
     fn material_output_stems_are_prefixed() {
         assert_eq!(model_output_stem("hash", true), "Mhash");
         assert_eq!(model_output_stem("hash", false), "hash");
+    }
+
+    #[test]
+    fn parallel_map_uses_requested_os_threads() {
+        let thread_ids =
+            parallel_map((0..8).collect::<Vec<_>>(), 4, |_| thread::current().id()).unwrap();
+        let unique_thread_ids = thread_ids.into_iter().collect::<HashSet<_>>();
+        assert_eq!(unique_thread_ids.len(), 4);
     }
 
     #[test]

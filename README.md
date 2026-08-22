@@ -14,7 +14,8 @@ Export a directory and also create GLB files:
 roform path/to/place.rbxlx \
   --out-dir build/roform \
   --materials-dir assets/material \
-  --compile mesh,model,glb
+  --compile mesh,model,glb \
+  --jobs 4
 ```
 
 > [!WARNING]
@@ -24,23 +25,24 @@ roform path/to/place.rbxlx \
 
 ```rust
 use std::path::Path;
-use roform::{export_glbs, export_models, ModelExportOptions};
+use roform::{export_glbs_with_jobs, export_models_with_jobs, ModelExportOptions};
 
 fn export() -> Result<(), String> {
-    let models = export_models(
+    let models = export_models_with_jobs(
         Path::new("place.rbxmx"),
         Path::new("roform/download"),
         Path::new("roform/mesh"),
         Path::new("assets/material"),
         Path::new("roform/model"),
         ModelExportOptions::default(),
+        4,
     )?;
 
     for failure in &models.failed {
         eprintln!("{}: {}", failure.source, failure.error);
     }
 
-    let glbs = export_glbs(&models.models, Path::new("roform/glb"), false)?;
+    let glbs = export_glbs_with_jobs(&models.models, Path::new("roform/glb"), false, 4)?;
     assert!(glbs.failed.is_empty());
     Ok(())
 }
