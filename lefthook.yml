@@ -3,7 +3,7 @@ pre-commit:
   commands:
     oxfmt:
       glob: "*.{js,jsx,ts,tsx,json,css,scss,md,toml,yml,yaml}"
-      run: mise exec -- oxfmt --write {staged_files}
+      run: mise exec -- oxfmt --no-error-on-unmatched-pattern --write {staged_files}
       stage_fixed: true
     rustfmt:
       glob: "*.rs"
