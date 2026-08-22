@@ -3,7 +3,7 @@ name = "roform"
 version = "0.2.0"
 description = "Parse Roblox files into render-agnostic glTF"
 edition = "2024"
-publish = false
+publish = true
 
 [dependencies]
 blake3 = "1"
