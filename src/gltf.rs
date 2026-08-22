@@ -10,8 +10,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(crate) const NO_RENDERABLE_GEOMETRY: &str = "model contains no renderable geometry";
-
 pub(crate) fn model_to_gltf(
     model: &ModelAsset,
     download_dir: &Path,
@@ -22,7 +20,7 @@ pub(crate) fn model_to_gltf(
     include_textures: bool,
 ) -> Result<Vec<u8>, String> {
     if model.primitives.is_empty() {
-        return Err(NO_RENDERABLE_GEOMETRY.to_owned());
+        return empty_model_to_gltf(model);
     }
 
     let vertex_stride = 36usize;
@@ -243,6 +241,24 @@ pub(crate) fn model_to_gltf(
     Ok(gltf)
 }
 
+fn empty_model_to_gltf(model: &ModelAsset) -> Result<Vec<u8>, String> {
+    let json_value = json!({
+        "asset": { "version": "2.0", "generator": "roform" },
+        "extras": {
+            "roblox": model.extras,
+            "roform": { "hasGeometry": false }
+        },
+        "nodes": [{
+            "name": model.name.as_str(),
+            "extras": { "roform": { "hasGeometry": false } }
+        }],
+        "scenes": [{ "nodes": [0] }],
+        "scene": 0
+    });
+    serde_json::to_vec_pretty(&json_value)
+        .map_err(|error| format!("failed to serialize empty glTF: {error}"))
+}
+
 pub(crate) fn gltf_to_glb(gltf: &[u8], gltf_path: &Path) -> Result<Vec<u8>, String> {
     let mut document: Value = serde_json::from_slice(gltf)
         .map_err(|error| format!("failed to parse GLTF {}: {error}", gltf_path.display()))?;
@@ -253,30 +269,43 @@ pub(crate) fn gltf_to_glb(gltf: &[u8], gltf_path: &Path) -> Result<Vec<u8>, Stri
         )
     })?;
 
-    let buffer_uri = document
+    let mut has_binary_chunk = document
         .get("buffers")
         .and_then(Value::as_array)
-        .and_then(|buffers| buffers.first())
-        .and_then(|buffer| buffer.get("uri"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| "GLTF does not contain an external buffer URI".to_owned())?
-        .to_owned();
-    let mut binary = read_external_resource(&buffer_uri, gltf_dir)?;
+        .is_some_and(|buffers| !buffers.is_empty());
+    let mut binary = if has_binary_chunk {
+        let buffer_uri = document
+            .get("buffers")
+            .and_then(Value::as_array)
+            .and_then(|buffers| buffers.first())
+            .and_then(|buffer| buffer.get("uri"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| "GLTF does not contain an external buffer URI".to_owned())?
+            .to_owned();
+        let binary = read_external_resource(&buffer_uri, gltf_dir)?;
 
-    let buffer = document
-        .get_mut("buffers")
-        .and_then(Value::as_array_mut)
-        .and_then(|buffers| buffers.first_mut())
-        .ok_or_else(|| "GLTF does not contain a buffer".to_owned())?;
-    let buffer_object = buffer
-        .as_object_mut()
-        .ok_or_else(|| "GLTF buffer is not an object".to_owned())?;
-    buffer_object.remove("uri");
+        let buffer = document
+            .get_mut("buffers")
+            .and_then(Value::as_array_mut)
+            .and_then(|buffers| buffers.first_mut())
+            .ok_or_else(|| "GLTF does not contain a buffer".to_owned())?;
+        let buffer_object = buffer
+            .as_object_mut()
+            .ok_or_else(|| "GLTF buffer is not an object".to_owned())?;
+        buffer_object.remove("uri");
+        binary
+    } else {
+        Vec::new()
+    };
 
     let image_count = document
         .get("images")
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
+    if image_count > 0 && !has_binary_chunk {
+        document["buffers"] = json!([{ "byteLength": 0 }]);
+        has_binary_chunk = true;
+    }
     for image_index in 0..image_count {
         let image_uri = document["images"][image_index]
             .get("uri")
@@ -310,24 +339,32 @@ pub(crate) fn gltf_to_glb(gltf: &[u8], gltf_path: &Path) -> Result<Vec<u8>, Stri
         image.insert("bufferView".to_owned(), json!(buffer_view_index));
     }
 
-    document["buffers"][0]["byteLength"] = json!(binary.len());
+    if has_binary_chunk {
+        document["buffers"][0]["byteLength"] = json!(binary.len());
+    }
 
     let mut json_chunk = serde_json::to_vec(&document)
         .map_err(|error| format!("failed to serialize GLB JSON: {error}"))?;
     pad_to_four(&mut json_chunk, b' ');
-    pad_to_four(&mut binary, 0);
+    if has_binary_chunk {
+        pad_to_four(&mut binary, 0);
+    }
 
+    let binary_chunk_length = if has_binary_chunk {
+        8usize
+            .checked_add(binary.len())
+            .ok_or_else(|| "GLB is too large".to_owned())?
+    } else {
+        0
+    };
     let total_length = 12usize
         .checked_add(8)
         .and_then(|length| length.checked_add(json_chunk.len()))
-        .and_then(|length| length.checked_add(8))
-        .and_then(|length| length.checked_add(binary.len()))
+        .and_then(|length| length.checked_add(binary_chunk_length))
         .ok_or_else(|| "GLB is too large".to_owned())?;
     let total_length = u32::try_from(total_length).map_err(|_| "GLB is too large".to_owned())?;
     let json_length =
         u32::try_from(json_chunk.len()).map_err(|_| "GLB JSON is too large".to_owned())?;
-    let binary_length =
-        u32::try_from(binary.len()).map_err(|_| "GLB binary chunk is too large".to_owned())?;
 
     let mut glb = Vec::with_capacity(total_length as usize);
     glb.extend_from_slice(&0x46546c67u32.to_le_bytes());
@@ -336,9 +373,13 @@ pub(crate) fn gltf_to_glb(gltf: &[u8], gltf_path: &Path) -> Result<Vec<u8>, Stri
     glb.extend_from_slice(&json_length.to_le_bytes());
     glb.extend_from_slice(&0x4e4f534au32.to_le_bytes());
     glb.extend_from_slice(&json_chunk);
-    glb.extend_from_slice(&binary_length.to_le_bytes());
-    glb.extend_from_slice(&0x004e4942u32.to_le_bytes());
-    glb.extend_from_slice(&binary);
+    if has_binary_chunk {
+        let binary_length =
+            u32::try_from(binary.len()).map_err(|_| "GLB binary chunk is too large".to_owned())?;
+        glb.extend_from_slice(&binary_length.to_le_bytes());
+        glb.extend_from_slice(&0x004e4942u32.to_le_bytes());
+        glb.extend_from_slice(&binary);
+    }
     Ok(glb)
 }
 
@@ -748,6 +789,45 @@ mod tests {
         assert_eq!(binary_length, 8);
         assert_eq!(&glb[binary_start..binary_start + 7], [1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(glb[binary_start + 7], 0);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn packs_meshless_gltf_as_json_only_glb() {
+        let root = std::env::temp_dir().join(format!(
+            "roform-empty-glb-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let model_dir = root.join("model");
+        fs::create_dir_all(&model_dir).unwrap();
+
+        let gltf = serde_json::to_vec(&json!({
+            "asset": { "version": "2.0" },
+            "extras": { "roform": { "hasGeometry": false } },
+            "nodes": [{ "name": "EffectsModel" }],
+            "scenes": [{ "nodes": [0] }],
+            "scene": 0
+        }))
+        .unwrap();
+        let glb = gltf_to_glb(&gltf, &model_dir.join("empty.gltf")).unwrap();
+
+        assert_eq!(&glb[0..4], b"glTF");
+        assert_eq!(u32::from_le_bytes(glb[4..8].try_into().unwrap()), 2);
+        assert_eq!(
+            u32::from_le_bytes(glb[8..12].try_into().unwrap()) as usize,
+            glb.len()
+        );
+        let json_length = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        assert_eq!(&glb[16..20], b"JSON");
+        assert_eq!(glb.len(), 20 + json_length);
+        let document: Value = serde_json::from_slice(&glb[20..20 + json_length]).unwrap();
+        assert!(document.get("buffers").is_none());
+        assert_eq!(document["extras"]["roform"]["hasGeometry"], false);
 
         fs::remove_dir_all(root).unwrap();
     }

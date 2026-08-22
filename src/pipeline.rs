@@ -3,6 +3,7 @@ use crate::{
     model::{self, ModelAsset},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
@@ -699,7 +700,7 @@ fn process_model_source(
 
         let output_lock = output_locks.for_path(&output_path);
         let _output_guard = output_lock.lock().expect("model output lock poisoned");
-        if !recompile && output_path.is_file() && buffer_output_path.is_file() {
+        if !recompile && model_output_is_complete(&output_path, &buffer_output_path) {
             let manifest_entry = ModelManifestEntry {
                 hash: model_hash,
                 output: cache_path(&output_path),
@@ -722,7 +723,6 @@ fn process_model_source(
             includes_materials,
         ) {
             Ok(gltf) => gltf,
-            Err(error) if error == gltf::NO_RENDERABLE_GEOMETRY => continue,
             Err(error) => {
                 result.failed.push(ModelFailure {
                     source: format!("{} / {}", source_path.display(), model_asset.name),
@@ -912,6 +912,20 @@ fn cache_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn model_output_is_complete(output_path: &Path, buffer_output_path: &Path) -> bool {
+    let Ok(bytes) = fs::read(output_path) else {
+        return false;
+    };
+    let Ok(document) = serde_json::from_slice::<Value>(&bytes) else {
+        return false;
+    };
+    let has_binary_buffer = document
+        .get("buffers")
+        .and_then(Value::as_array)
+        .is_some_and(|buffers| !buffers.is_empty());
+    !has_binary_buffer || buffer_output_path.is_file()
+}
+
 fn reusable_mesh_manifest(mesh_dir: &Path) -> Option<MeshManifest> {
     let manifest_bytes = fs::read(mesh_dir.join("manifest.json")).ok()?;
     let manifest: MeshManifest = serde_json::from_slice(&manifest_bytes).ok()?;
@@ -1058,8 +1072,10 @@ fn reusable_source_models(
         else {
             return false;
         };
-        Path::new(&model.output).is_file()
-            && buffer_dir.join(format!("{output_stem}.bin")).is_file()
+        model_output_is_complete(
+            Path::new(&model.output),
+            &buffer_dir.join(format!("{output_stem}.bin")),
+        )
     }) {
         Some((models, dependencies))
     } else {
@@ -1236,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_models_without_renderable_geometry() {
+    fn exports_models_without_renderable_geometry() {
         let root = std::env::temp_dir().join(format!(
             "roform-pipeline-empty-model-{}-{}",
             std::process::id(),
@@ -1267,10 +1283,34 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.exported, 0);
+        assert_eq!(report.exported, 1);
         assert_eq!(report.cached, 0);
         assert!(report.failed.is_empty());
-        assert!(report.models.is_empty());
+        assert_eq!(report.models.len(), 1);
+
+        let gltf: Value =
+            serde_json::from_slice(&fs::read(&report.models[0].output).unwrap()).unwrap();
+        assert_eq!(gltf["extras"]["roform"]["hasGeometry"], false);
+        assert_eq!(gltf["scenes"][0]["nodes"], serde_json::json!([0]));
+        assert!(gltf.get("meshes").is_none());
+        assert!(gltf.get("buffers").is_none());
+
+        let cached = export_models_with_jobs(
+            &input,
+            &root.join("download"),
+            &root.join("mesh"),
+            &root.join("assets"),
+            &root.join("model"),
+            ModelExportOptions::default(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(cached.exported, 0);
+        assert_eq!(cached.cached, 1);
+
+        let glb = export_glbs(&report.models, &root.join("glb"), false).unwrap();
+        assert_eq!(glb.exported, 1);
+        assert!(glb.failed.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
