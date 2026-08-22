@@ -1,6 +1,6 @@
 {
   "name": "@unrealworks/roform-win32-arm64",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Windows arm64 binary for roform",
   "license": "MIT",
   "repository": {

@@ -1,6 +1,6 @@
 [package]
 name = "roform"
-version = "0.2.0"
+version = "0.3.0"
 description = "Parse Roblox files into render-agnostic glTF"
 edition = "2024"
 publish = true
