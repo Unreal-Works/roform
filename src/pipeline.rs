@@ -74,6 +74,7 @@ struct ModelManifest {
     version: u32,
     studs_per_tile: f32,
     includes_materials: bool,
+    includes_geometry: bool,
     dependencies: BTreeMap<String, String>,
     sources: Vec<ModelSourceManifestEntry>,
     models: Vec<ModelManifestEntry>,
@@ -105,7 +106,7 @@ struct MeshManifestEntry {
 /// be stored consistently in the manifest on every platform.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelManifestEntry {
-    /// Content and configuration hash used as the model output stem.
+    /// Content and configuration hash used to derive the model output stem.
     pub hash: String,
     /// Absolute path to the model GLTF file.
     pub output: String,
@@ -191,6 +192,9 @@ pub struct ModelExportOptions {
     /// Whether material definitions and available material textures are
     /// included in the exported GLTF. The default is `true`.
     pub includes_materials: bool,
+    /// Whether generated mesh geometry is included in the exported GLTF. The
+    /// default is `true`; when `false`, only Roblox metadata is exported.
+    pub includes_geometry: bool,
     /// Whether existing model GLTF files should be ignored and regenerated.
     /// Cached downloads and decoded meshes are still reusable. The default is
     /// `false`.
@@ -202,6 +206,7 @@ impl Default for ModelExportOptions {
         Self {
             studs_per_tile: 1.0,
             includes_materials: true,
+            includes_geometry: true,
             recompile: false,
         }
     }
@@ -446,6 +451,7 @@ pub fn export_models_with_jobs(
     let ModelExportOptions {
         studs_per_tile,
         includes_materials,
+        includes_geometry,
         recompile,
     } = options;
     let download_dir = absolute_path(download_dir)?;
@@ -477,7 +483,12 @@ pub fn export_models_with_jobs(
     let previous_manifest = if recompile {
         None
     } else {
-        reusable_manifest(&output_dir, studs_per_tile, includes_materials)
+        reusable_manifest(
+            &output_dir,
+            studs_per_tile,
+            includes_materials,
+            includes_geometry,
+        )
     };
     let mut fingerprints = FingerprintState::load(&mesh_dir.join("fingerprint.json"));
     let current_sources = source_files
@@ -530,6 +541,7 @@ pub fn export_models_with_jobs(
             previous_manifest.as_ref(),
             studs_per_tile,
             includes_materials,
+            includes_geometry,
             recompile,
             base_fingerprints.clone(),
             &output_locks,
@@ -557,6 +569,7 @@ pub fn export_models_with_jobs(
         version: MODEL_MANIFEST_VERSION,
         studs_per_tile,
         includes_materials,
+        includes_geometry,
         dependencies: manifest_dependencies,
         sources: manifest_sources,
         models: manifest_entries,
@@ -580,6 +593,7 @@ fn process_model_source(
     previous_manifest: Option<&ModelManifest>,
     studs_per_tile: f32,
     includes_materials: bool,
+    includes_geometry: bool,
     recompile: bool,
     fingerprints: FingerprintState,
     output_locks: &OutputLocks,
@@ -630,7 +644,13 @@ fn process_model_source(
             return result;
         }
     };
-    let models = match model::parse_models(&source_path, download_dir, mesh_dir, studs_per_tile) {
+    let models = match model::parse_models(
+        &source_path,
+        download_dir,
+        mesh_dir,
+        studs_per_tile,
+        includes_geometry,
+    ) {
         Ok(models) => models,
         Err(error) => {
             result.failed.push(ModelFailure {
@@ -672,6 +692,7 @@ fn process_model_source(
                 download_dir,
                 materials_dir,
                 includes_materials,
+                includes_geometry,
                 fingerprints: &mut result.fingerprints,
             },
         ) {
@@ -681,7 +702,7 @@ fn process_model_source(
                 return result;
             }
         };
-        let output_stem = model_output_stem(&model_hash, includes_materials);
+        let output_stem = model_output_stem(&model_hash, includes_materials, includes_geometry);
         let output_path = output_dir.join(format!("{output_stem}.gltf"));
         let buffer_output_path = output_dir
             .parent()
@@ -955,6 +976,7 @@ fn model_fingerprint(
     hasher.update(model_index.to_string().as_bytes());
     hasher.update(&studs_per_tile.to_le_bytes());
     hasher.update(&[context.includes_materials as u8]);
+    hasher.update(&[context.includes_geometry as u8]);
     for path in model_dependency_paths(
         model,
         context.download_dir,
@@ -967,8 +989,18 @@ fn model_fingerprint(
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-fn model_output_stem(model_hash: &str, includes_materials: bool) -> String {
-    let prefix = if includes_materials { "M" } else { "" };
+fn model_output_stem(
+    model_hash: &str,
+    includes_materials: bool,
+    includes_geometry: bool,
+) -> String {
+    let prefix = if !includes_geometry {
+        "NG"
+    } else if includes_materials {
+        "M"
+    } else {
+        ""
+    };
     format!("{prefix}{model_hash}")
 }
 
@@ -990,12 +1022,14 @@ fn reusable_manifest(
     output_dir: &Path,
     studs_per_tile: f32,
     includes_materials: bool,
+    includes_geometry: bool,
 ) -> Option<ModelManifest> {
     let manifest_bytes = fs::read(output_dir.join("manifest.json")).ok()?;
     let manifest: ModelManifest = serde_json::from_slice(&manifest_bytes).ok()?;
     if manifest.version != MODEL_MANIFEST_VERSION
         || manifest.studs_per_tile != studs_per_tile
         || manifest.includes_materials != includes_materials
+        || manifest.includes_geometry != includes_geometry
     {
         return None;
     }
@@ -1159,6 +1193,7 @@ struct ModelFingerprintContext<'a> {
     download_dir: &'a Path,
     materials_dir: &'a Path,
     includes_materials: bool,
+    includes_geometry: bool,
     fingerprints: &'a mut FingerprintState,
 }
 
@@ -1247,8 +1282,9 @@ mod tests {
 
     #[test]
     fn material_output_stems_are_prefixed() {
-        assert_eq!(model_output_stem("hash", true), "Mhash");
-        assert_eq!(model_output_stem("hash", false), "hash");
+        assert_eq!(model_output_stem("hash", true, true), "Mhash");
+        assert_eq!(model_output_stem("hash", false, true), "hash");
+        assert_eq!(model_output_stem("hash", true, false), "NGhash");
     }
 
     #[test]
@@ -1311,6 +1347,101 @@ mod tests {
         let glb = export_glbs(&report.models, &root.join("glb"), false).unwrap();
         assert_eq!(glb.exported, 1);
         assert!(glb.failed.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn can_export_metadata_without_geometry() {
+        let root = std::env::temp_dir().join(format!(
+            "roform-pipeline-no-geometry-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let input = root.join("primitives.rbxmx");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &input,
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/fixtures/PRIMITIVES - hut.rbxmx"
+            )),
+        )
+        .unwrap();
+
+        let metadata_only = export_models_with_jobs(
+            &input,
+            &root.join("download"),
+            &root.join("mesh"),
+            &root.join("assets"),
+            &root.join("model"),
+            ModelExportOptions {
+                includes_geometry: false,
+                ..ModelExportOptions::default()
+            },
+            1,
+        )
+        .unwrap();
+        assert_eq!(metadata_only.exported, 1);
+        assert!(metadata_only.failed.is_empty());
+
+        let metadata_only_gltf: Value =
+            serde_json::from_slice(&fs::read(&metadata_only.models[0].output).unwrap()).unwrap();
+        assert_eq!(metadata_only_gltf["extras"]["roform"]["hasGeometry"], false);
+        assert!(metadata_only_gltf["extras"]["roblox"].is_object());
+        assert_eq!(
+            metadata_only_gltf["scenes"][0]["nodes"],
+            serde_json::json!([0])
+        );
+        assert!(metadata_only_gltf.get("meshes").is_none());
+        assert!(metadata_only_gltf.get("buffers").is_none());
+        assert!(
+            Path::new(&metadata_only.models[0].output)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| stem.starts_with("NG"))
+        );
+        assert!(!root.join("bin").exists());
+
+        let metadata_only_glb =
+            export_glbs(&metadata_only.models, &root.join("glb"), false).unwrap();
+        assert_eq!(metadata_only_glb.exported, 1);
+        let glb_stem = Path::new(&metadata_only.models[0].output)
+            .file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(glb_stem.starts_with("NG"));
+        assert!(root.join("glb").join(format!("{glb_stem}.glb")).is_file());
+        assert!(metadata_only_glb.failed.is_empty());
+
+        let with_geometry = export_models_with_jobs(
+            &input,
+            &root.join("download"),
+            &root.join("mesh"),
+            &root.join("assets"),
+            &root.join("model"),
+            ModelExportOptions {
+                includes_geometry: true,
+                ..ModelExportOptions::default()
+            },
+            1,
+        )
+        .unwrap();
+        assert_eq!(with_geometry.exported, 1);
+        assert_eq!(with_geometry.cached, 0);
+        assert_ne!(
+            with_geometry.models[0].output,
+            metadata_only.models[0].output
+        );
+
+        let with_geometry_gltf: Value =
+            serde_json::from_slice(&fs::read(&with_geometry.models[0].output).unwrap()).unwrap();
+        assert!(with_geometry_gltf["meshes"].is_array());
+        assert!(with_geometry_gltf["buffers"].is_array());
+
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1394,6 +1525,7 @@ mod tests {
             version: MODEL_MANIFEST_VERSION,
             studs_per_tile: 1.0,
             includes_materials: true,
+            includes_geometry: true,
             dependencies: BTreeMap::new(),
             sources: vec![
                 ModelSourceManifestEntry {
@@ -1466,6 +1598,7 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
+                includes_geometry: true,
                 recompile: false,
             },
         )
@@ -1494,6 +1627,7 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
+                includes_geometry: true,
                 recompile: false,
             },
         )
@@ -1519,6 +1653,7 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
+                includes_geometry: true,
                 recompile: false,
             },
         )
@@ -1535,6 +1670,7 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
+                includes_geometry: true,
                 recompile: false,
             },
         )
@@ -1551,6 +1687,7 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
+                includes_geometry: true,
                 recompile: false,
             },
         )
@@ -1567,6 +1704,7 @@ mod tests {
             ModelExportOptions {
                 studs_per_tile: 1.0,
                 includes_materials: true,
+                includes_geometry: true,
                 recompile: true,
             },
         )

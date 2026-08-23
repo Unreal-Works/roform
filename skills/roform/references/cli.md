@@ -4,7 +4,8 @@
 
 ```text
 roform INPUT [--out-dir DIRECTORY] [--compile STAGE[,STAGE...]] [--no-compile]
-             [--materials-dir DIRECTORY] [--recompile] [--jobs N] [--studs-per-tile STUDS]
+             [--no-geometry] [--materials-dir DIRECTORY]
+             [--recompile] [--jobs N] [--studs-per-tile STUDS]
 ```
 
 ## Installation
@@ -27,7 +28,7 @@ download -> mesh -> model -> glb
 
 - **download**: fetches every asset id referenced by the input (MeshPart meshes, textures, CSG operation packages) into `<out-dir>/download/`, keyed by asset id. Always runs, even with `--no-compile`.
 - **mesh**: decodes downloaded mesh payloads into the versioned `ROFMESH1` cache under `<out-dir>/mesh/<blake3-of-payload>.bin`.
-- **model**: writes one glTF document per Roblox source file under `<out-dir>/model/`, with external buffers under `<out-dir>/bin/`. The filename stem is the content/config hash; a `M` prefix marks material-enabled output.
+- **model**: writes one glTF document per Roblox source file under `<out-dir>/model/`, with external buffers under `<out-dir>/bin/`. The filename stem is the content/config hash; a `M` prefix marks material-enabled output and an `NG` prefix marks no mesh or buffer output.
 - **glb**: packages each model glTF (plus its buffer and textures) into `<out-dir>/glb/<stem>.glb`. Meshless models become JSON-only GLBs without a BIN chunk.
 
 ## Console output
@@ -52,12 +53,12 @@ Exit codes: `0` when the pipeline completed (even with per-source failures), `1`
 
 ## Caching rules
 
-| Layer       | Cache key                                      | Invalidated by                                                         |
-| ----------- | ---------------------------------------------- | ---------------------------------------------------------------------- |
-| `download/` | asset id                                       | nothing (reused forever; new ids are fetched on demand)                |
-| `mesh/`     | blake3 hash of the downloaded mesh payload     | only new/changed payloads; unchanged sources skip DOM parsing entirely |
-| `model/`    | fingerprint of source + dependencies + options | edits, changed `--studs-per-tile`/`--materials-dir`, roform upgrades   |
-| `glb/`      | existence of the output file                   | `--recompile` or deleting the file                                     |
+| Layer       | Cache key                                      | Invalidated by                                                                     |
+| ----------- | ---------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `download/` | asset id                                       | nothing (reused forever; new ids are fetched on demand)                            |
+| `mesh/`     | blake3 hash of the downloaded mesh payload     | only new/changed payloads; unchanged sources skip DOM parsing entirely             |
+| `model/`    | fingerprint of source + dependencies + options | edits, changed `--studs-per-tile`/`--materials-dir`/geometry mode, roform upgrades |
+| `glb/`      | existence of the output file                   | `--recompile` or deleting the file                                                 |
 
 - `--recompile` regenerates model glTFs and GLBs but still reuses cached downloads and decoded meshes.
 - Cache formats are versioned; upgrading roform to a version that changed output structure regenerates affected files automatically.

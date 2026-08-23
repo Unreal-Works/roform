@@ -101,6 +101,7 @@ roform/
 │   └── manifest.json         # Source-to-mesh cache mapping
 ├── model/                    # glTF documents when model compilation is selected
 │   ├── M<hash>.gltf          # glTF with materials if --materials-dir is used
+│   ├── NG<hash>.gltf         # metadata-only glTF when --no-geometry is used
 │   ├── <hash>.gltf           # glTF without materials when --materials-dir is omitted
 │   └── manifest.json         # Source and output mapping
 ├── bin/                      # glTF binary buffers

@@ -60,6 +60,18 @@ struct Cli {
     no_compile: bool,
     #[arg(
         long,
+        conflicts_with = "no_geometry",
+        help = "Include generated mesh geometry in GLTF and GLB output (default)"
+    )]
+    geometry: bool,
+    #[arg(
+        long,
+        conflicts_with = "geometry",
+        help = "Omit mesh geometry while preserving Roblox metadata"
+    )]
+    no_geometry: bool,
+    #[arg(
+        long,
         value_name = "DIRECTORY",
         help = "Directory containing fallback material images; enables materials"
     )]
@@ -97,6 +109,7 @@ fn main() -> ExitCode {
         cli.input,
         cli.out_dir,
         compile_plan(&cli.compile, cli.no_compile),
+        cli.geometry || !cli.no_geometry,
         cli.materials_dir,
         cli.recompile,
         cli.studs_per_tile,
@@ -114,6 +127,7 @@ fn run(
     input: PathBuf,
     out_dir: PathBuf,
     compile: CompilePlan,
+    includes_geometry: bool,
     materials_dir: Option<PathBuf>,
     recompile: bool,
     studs_per_tile: f32,
@@ -174,6 +188,7 @@ fn run(
             ModelExportOptions {
                 studs_per_tile,
                 includes_materials,
+                includes_geometry,
                 recompile,
             },
             jobs,
@@ -241,6 +256,7 @@ mod tests {
         assert!(recompile_cli.recompile);
 
         let default_cli = Cli::try_parse_from(["roform", "input.rbxmx"]).unwrap();
+        assert!(!default_cli.no_geometry);
         assert_eq!(default_cli.jobs, DEFAULT_DOWNLOAD_JOBS);
         assert_eq!(
             compile_plan(&default_cli.compile, default_cli.no_compile),
@@ -305,5 +321,15 @@ mod tests {
         assert!(Cli::try_parse_from(["roform", "input.rbxmx", "--model"]).is_err());
         assert!(Cli::try_parse_from(["roform", "input.rbxmx", "--no-model"]).is_err());
         assert!(Cli::try_parse_from(["roform", "input.rbxmx", "--glb"]).is_err());
+
+        let no_geometry_cli =
+            Cli::try_parse_from(["roform", "input.rbxmx", "--no-geometry"]).unwrap();
+        assert!(!no_geometry_cli.geometry && no_geometry_cli.no_geometry);
+
+        let geometry_cli = Cli::try_parse_from(["roform", "input.rbxmx", "--geometry"]).unwrap();
+        assert!(geometry_cli.geometry && !geometry_cli.no_geometry);
+        assert!(
+            Cli::try_parse_from(["roform", "input.rbxmx", "--geometry", "--no-geometry"]).is_err()
+        );
     }
 }

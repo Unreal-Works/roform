@@ -1,6 +1,6 @@
 ---
 name: roform
-description: "Use this skill when converting Roblox .rbxm, .rbxmx, .rbxl, or .rbxlx files into glTF or GLB with the roform CLI or Rust library. Covers installing via npm, CLI flags (--out-dir, --compile, --no-compile, --materials-dir, --recompile, --jobs, --studs-per-tile), the output directory layout, cache reuse, the Rust export API (export_meshes, export_models, export_glbs and their *_with_jobs variants), ModelExportOptions, report types, staging asset downloads with mhif, reading extras.roblox metadata, material texture directories, and consuming the exported models in a renderer. Triggers on: roform, rbxm, rbxmx, rbxl, rbxlx, Roblox to glTF, glTF export, GLB export, export_models, export_glbs, ModelExportOptions, extras.roblox, KHR_materials_unlit."
+description: "Use this skill when converting Roblox .rbxm, .rbxmx, .rbxl, or .rbxlx files into glTF or GLB with the roform CLI or Rust library. Covers installing via npm, CLI flags (--out-dir, --compile, --no-compile, --geometry, --no-geometry, --materials-dir, --recompile, --jobs, --studs-per-tile), the output directory layout, cache reuse, the Rust export API (export_meshes, export_models, export_glbs and their *_with_jobs variants), ModelExportOptions, report types, staging asset downloads with mhif, reading extras.roblox metadata, material texture directories, and consuming the exported models in a renderer. Triggers on: roform, rbxm, rbxmx, rbxl, rbxlx, Roblox to glTF, glTF export, GLB export, export_models, export_glbs, ModelExportOptions, extras.roblox, KHR_materials_unlit."
 license: MIT
 ---
 
@@ -32,7 +32,9 @@ build/roform/
 ├── download/                 # staged Roblox asset downloads
 ├── mesh/                     # decoded mesh cache (<hash>.bin + manifest.json)
 ├── model/                    # glTF documents (+ manifest.json)
-│   └── M<hash>.gltf          # M prefix when --materials-dir is set
+│   ├── M<hash>.gltf          # M prefix when --materials-dir is set
+│   ├── NG<hash>.gltf         # NG prefix for --no-geometry output
+│   └── <hash>.gltf           # geometry without materials
 ├── bin/                      # external glTF binary buffers
 └── glb/                      # only created when glb is in --compile
 ```
@@ -76,16 +78,18 @@ The library never downloads assets; stage them yourself with the `mhif` crate fi
 
 ## CLI flags
 
-| Flag                        | Default            | Effect                                                                                    |
-| --------------------------- | ------------------ | ----------------------------------------------------------------------------------------- |
-| `INPUT` (positional)        | required           | File or directory to scan for Roblox sources                                              |
-| `--out-dir DIRECTORY`       | `./roform`         | Root for all stages' output and caches                                                    |
-| `--compile STAGE[,STAGE…]`  | `mesh,model`       | Stages to run after download: `mesh`, `model`, `glb`. Later stages imply earlier ones     |
-| `--no-compile`              | off                | Skip all compilation; downloads still run. Conflicts with `--compile`                     |
-| `--materials-dir DIRECTORY` | off                | Enables material textures; without it exports keep part colors/transparency but no images |
-| `--recompile`               | off                | Ignore cached model and GLB outputs; cached downloads and decoded meshes are still reused |
-| `--jobs N`                  | downloader default | Max concurrent downloads **and** max compile threads; values below 1 are treated as 1     |
-| `--studs-per-tile STUDS`    | `2.0`              | Physical studs represented by one texture tile; must be finite and greater than zero      |
+| Flag                        | Default            | Effect                                                                                       |
+| --------------------------- | ------------------ | -------------------------------------------------------------------------------------------- |
+| `INPUT` (positional)        | required           | File or directory to scan for Roblox sources                                                 |
+| `--out-dir DIRECTORY`       | `./roform`         | Root for all stages' output and caches                                                       |
+| `--compile STAGE[,STAGE…]`  | `mesh,model`       | Stages to run after download: `mesh`, `model`, `glb`. Later stages imply earlier ones        |
+| `--no-compile`              | off                | Skip all compilation; downloads still run. Conflicts with `--compile`                        |
+| `--geometry`                | on                 | Include generated mesh geometry in model GLTF and GLB output; conflicts with `--no-geometry` |
+| `--no-geometry`             | off                | Omit mesh geometry while preserving recursive Roblox metadata; conflicts with `--geometry`   |
+| `--materials-dir DIRECTORY` | off                | Enables material textures; without it exports keep part colors/transparency but no images    |
+| `--recompile`               | off                | Ignore cached model and GLB outputs; cached downloads and decoded meshes are still reused    |
+| `--jobs N`                  | downloader default | Max concurrent downloads **and** max compile threads; values below 1 are treated as 1        |
+| `--studs-per-tile STUDS`    | `2.0`              | Physical studs represented by one texture tile; must be finite and greater than zero         |
 
 Compile-stage implications:
 
@@ -110,6 +114,7 @@ glb: exported 4, reused 0, failed 0 -> Z:\proj\roform\glb in 0.30s
 
 - `extras.roblox` on the document root, every geometry node, and its meshes carries the full instance tree: `className`, `name`, `referent`, typed `properties`, `propertyTypes`, recursive `children`.
 - Models with no renderable geometry export as scenes with `extras.roform.hasGeometry: false` and no buffers.
+- Passing `--no-geometry` deliberately produces the same metadata-only scene shape for models that do contain renderable instances; `--geometry` is the default.
 - Neon materials use the glTF `KHR_materials_unlit` extension so they render without lighting.
 - Textures are embedded as data URIs; buffers are external `<stem>.bin` files under `bin/` (GLBs are fully self-contained).
 
@@ -131,6 +136,7 @@ Every workflow has a reference file:
 - **Need single-file binaries for an engine import pipeline?** Add `glb` to `--compile`.
 - **Your renderer implements materials itself?** Omit `--materials-dir`; read part color from `extras.roblox`.
 - **Only want downloads staged for later processing?** Pass `--no-compile`.
+- **Only want Roblox metadata in the generated model files?** Pass `--no-geometry`.
 - **Edited a source file?** Just rerun the same command; caches re-export only what changed.
 - **Suspect stale output after upgrading roform?** Rerun with `--recompile` (cache formats are versioned and self-invalidate).
 - **Embedding in Rust?** Use the library API; see [references/library.md](references/library.md).

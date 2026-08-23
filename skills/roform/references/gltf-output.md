@@ -7,6 +7,7 @@ roform glTF documents are render-agnostic: geometry is plain glTF, and all Roblo
 - The Roblox instance hierarchy is preserved as the glTF node hierarchy.
 - `extras.roblox` appears on the document root and on every geometry node/mesh/primitive. Each entry describes its instance _and_ carries its complete recursive child-instance tree in `children`, so script-only instances (lights, emitters, GUIs) stay reachable even though they are never rendered as nodes.
 - Models without renderable geometry export as a single empty root node with `extras.roform.hasGeometry: false`; their recursive instance metadata is still in `extras.roblox`.
+- Models exported with `--no-geometry` or `ModelExportOptions { includes_geometry: false, .. }` use the same metadata-only shape even when the source contains renderable instances. Their GLTF has no meshes or buffers, and their GLB has no BIN chunk. They use a `NG<hash>` stem.
 
 ### `extras.roblox` schema
 
@@ -75,7 +76,7 @@ Read the `Material` enum value from `extras.roblox.properties.Material` to pick 
 - Generated flat-primitive UVs use model-space-anchored physical surface projections divided by `studs-per-tile`, so texture axes and phase stay consistent across translated/rotated parts. Cylinder sides follow circumference; spheres follow surface arc lengths.
 - Primitives with normal maps include generated tangent space.
 - Explicitly textured MeshParts keep their authored mesh UVs; untextured MeshParts get projection fallback UVs.
-- Output stems are content/config hashes: `<hash>.gltf` without materials, `M<hash>.gltf` with materials. The GLB stem matches its glTF stem.
+- Output stems are content/config hashes: `<hash>.gltf` without materials, `M<hash>.gltf` with materials, and `NG<hash>.gltf` with no geometry. The GLB stem matches its glTF stem.
 
 ## Rendering shapes yourself
 

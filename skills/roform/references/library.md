@@ -82,13 +82,15 @@ pub fn export_models_with_jobs(
 let options = ModelExportOptions {
     studs_per_tile: f32,       // default 1.0 in the library (CLI defaults to 2.0!)
     includes_materials: bool,  // default true
+    includes_geometry: bool,   // default true
     recompile: bool,           // default false
 };
-ModelExportOptions::default() // studs_per_tile: 1.0, includes_materials: true, recompile: false
+ModelExportOptions::default() // studs_per_tile: 1.0, includes_materials: true, includes_geometry: true, recompile: false
 ```
 
 - `studs_per_tile`: physical studs per texture tile; must be finite and `> 0`, otherwise the call returns `Err`. Changing it changes every model hash.
-- `includes_materials`: emits material definitions/textures and switches output naming from `<hash>.gltf` to `M<hash>.gltf`.
+- `includes_materials`: emits material definitions/textures and switches geometry-enabled output naming from `<hash>.gltf` to `M<hash>.gltf`.
+- `includes_geometry`: emits generated mesh geometry when `true`. When `false`, the GLTF contains only recursive Roblox metadata in an empty root scene, with no meshes or external buffer; the corresponding GLB is JSON-only and both output filenames use an `NG` prefix.
 - `recompile`: ignore cached model outputs. Cached downloads and decoded meshes stay reusable.
 
 ## Packaging GLBs

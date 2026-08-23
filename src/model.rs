@@ -51,6 +51,7 @@ pub(crate) fn parse_models(
     download_dir: &Path,
     mesh_dir: &Path,
     studs_per_tile: f32,
+    includes_geometry: bool,
 ) -> Result<Vec<ModelAsset>, String> {
     let dom = decode_source(path)?;
     let roots = model_roots(&dom);
@@ -64,6 +65,7 @@ pub(crate) fn parse_models(
                 download_dir,
                 mesh_dir,
                 studs_per_tile,
+                includes_geometry,
                 &mut mesh_cache,
             )
         })
@@ -212,6 +214,7 @@ fn parse_model(
     download_dir: &Path,
     mesh_dir: &Path,
     studs_per_tile: f32,
+    includes_geometry: bool,
     mesh_cache: &mut HashMap<String, Result<UnionMesh, String>>,
 ) -> Result<ModelAsset, String> {
     let root = dom
@@ -224,14 +227,16 @@ fn parse_model(
         .unwrap_or_else(CFrame::identity);
 
     let mut geometry_refs = Vec::new();
-    if metadata::is_geometry(root) {
-        geometry_refs.push(root_ref);
+    if includes_geometry {
+        if metadata::is_geometry(root) {
+            geometry_refs.push(root_ref);
+        }
+        geometry_refs.extend(
+            dom.descendants_of(root_ref)
+                .filter(|instance| metadata::is_geometry(instance))
+                .map(Instance::referent),
+        );
     }
-    geometry_refs.extend(
-        dom.descendants_of(root_ref)
-            .filter(|instance| metadata::is_geometry(instance))
-            .map(Instance::referent),
-    );
 
     let mut primitives = Vec::new();
     let mut warnings = Vec::new();
@@ -759,6 +764,7 @@ mod tests {
             std::path::Path::new("missing-download-directory"),
             std::path::Path::new("missing-mesh-directory"),
             1.0,
+            true,
         )
         .unwrap();
 
