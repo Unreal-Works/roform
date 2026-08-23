@@ -2,6 +2,10 @@
 
 Please update this document after any relevant changes.
 
+## Consumer Skill
+
+- `skills/roform/` holds a distributable skill for roform consumers (who do not see this repository's internals): `SKILL.md` plus `references/cli.md`, `references/library.md`, and `references/gltf-output.md`. When changing the public CLI flags, library API, output layout, manifests, or glTF conventions, update those files in the same change so consumer guidance stays accurate.
+
 ## Asset Pipeline
 
 - The CLI stages assets as `download`, decoded `mesh`, and hash-keyed `model` GLTF output. Decoded meshes are cached below `roform/mesh/<blake3-of-source-payload>.bin` in the versioned `ROFMESH1` format, with source-to-payload reuse recorded in `roform/mesh/manifest.json` and dependency content hashes cached in `roform/mesh/fingerprint.json`. Without `--materials-dir`, model GLTF files are written below `roform/model/<hash>.gltf`; when `--materials-dir` is provided, they use `roform/model/M<hash>.gltf`. Models with geometry use external buffers with the matching stem in `roform/bin/`; meshless models omit buffers, and source/model names are recorded in `roform/model/manifest.json`.
