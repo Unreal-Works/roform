@@ -977,13 +977,13 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mhif"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cce5de977ae2fb3f2523793637bd875081b6e080b0cb4d6a79e39cbb4a111ec"
+checksum = "9dba418926b7eaad8da82f0761ada73ce6710749e2c90c8fabbf8017401a000c"
 dependencies = [
  "blake3",
  "rbx_binary",
- "rbx_cookie",
+ "rbx_cookies",
  "rbx_dom_weak",
  "rbx_types",
  "rbx_xml",
@@ -1323,10 +1323,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "rbx_cookie"
+name = "rbx_cookies"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62d81c3d7cd53ac75f48a7b526e145d0b72c19d695364edb343e9248192d3f17"
+checksum = "7cc8e9a2a9e7686e2cdf3c1df42e61d57b8ca4ff5772aa0c8ff881f386511d9a"
 dependencies = [
  "byteorder 0.5.3",
  "cookie",
