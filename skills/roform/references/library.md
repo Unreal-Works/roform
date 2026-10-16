@@ -116,40 +116,40 @@ Pass the `models` slice from a previous `ModelReport` — its entries carry abso
 
 ### `MeshReport`
 
-| Field              | Type                  | Meaning                                              |
-| ------------------ | --------------------- | ---------------------------------------------------- |
-| `decoded`          | `usize`               | New decoded mesh cache files written this call       |
-| `cached`           | `usize`               | Decoded mesh cache files reused this call            |
-| `failed`           | `Vec<ModelFailure>`   | Sources whose meshes could not be decoded            |
-| `output_directory` | `PathBuf`             | Absolute mesh cache directory                        |
+| Field              | Type                | Meaning                                        |
+| ------------------ | ------------------- | ---------------------------------------------- |
+| `decoded`          | `usize`             | New decoded mesh cache files written this call |
+| `cached`           | `usize`             | Decoded mesh cache files reused this call      |
+| `failed`           | `Vec<ModelFailure>` | Sources whose meshes could not be decoded      |
+| `output_directory` | `PathBuf`           | Absolute mesh cache directory                  |
 
 ### `ModelReport`
 
-| Field              | Type                       | Meaning                                                   |
-| ------------------ | -------------------------- | --------------------------------------------------------- |
-| `exported`         | `usize`                    | Models written as new glTF files this call                |
-| `cached`           | `usize`                    | Models reused from cache this call                        |
-| `failed`           | `Vec<ModelFailure>`        | Models that could not be exported                         |
-| `models`           | `Vec<ModelManifestEntry>`  | Successful models; feed these to `export_glbs`            |
-| `output_directory` | `PathBuf`                  | Absolute model output directory                           |
+| Field              | Type                      | Meaning                                        |
+| ------------------ | ------------------------- | ---------------------------------------------- |
+| `exported`         | `usize`                   | Models written as new glTF files this call     |
+| `cached`           | `usize`                   | Models reused from cache this call             |
+| `failed`           | `Vec<ModelFailure>`       | Models that could not be exported              |
+| `models`           | `Vec<ModelManifestEntry>` | Successful models; feed these to `export_glbs` |
+| `output_directory` | `PathBuf`                 | Absolute model output directory                |
 
 ### `GlbReport`
 
-| Field              | Type                 | Meaning                                    |
-| ------------------ | -------------------- | ------------------------------------------ |
-| `exported`         | `usize`              | GLB files written this call                |
-| `cached`           | `usize`              | GLB files reused this call                 |
-| `failed`           | `Vec<ModelFailure>`  | Models whose GLB packaging failed          |
-| `output_directory` | `PathBuf`            | Absolute GLB output directory              |
+| Field              | Type                | Meaning                           |
+| ------------------ | ------------------- | --------------------------------- |
+| `exported`         | `usize`             | GLB files written this call       |
+| `cached`           | `usize`             | GLB files reused this call        |
+| `failed`           | `Vec<ModelFailure>` | Models whose GLB packaging failed |
+| `output_directory` | `PathBuf`           | Absolute GLB output directory     |
 
 ### `ModelManifestEntry`
 
-| Field     | Type     | Meaning                                          |
-| --------- | -------- | ------------------------------------------------ |
-| `hash`    | `String` | Content/config hash used as the output stem      |
-| `output`  | `String` | Absolute path to the model glTF file             |
-| `source`  | `String` | Absolute path to the Roblox source file          |
-| `name`    | `String` | Name of the Roblox model represented by the file |
+| Field    | Type     | Meaning                                          |
+| -------- | -------- | ------------------------------------------------ |
+| `hash`   | `String` | Content/config hash used as the output stem      |
+| `output` | `String` | Absolute path to the model glTF file             |
+| `source` | `String` | Absolute path to the Roblox source file          |
+| `name`   | `String` | Name of the Roblox model represented by the file |
 
 ### `ModelFailure`
 

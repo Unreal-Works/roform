@@ -1,8 +1,8 @@
 [tools]
-"github:oxc-project/oxc" = { version = "latest", matching = "oxfmt" }
 "github:Unreal-Works/cmdshim" = "0.3.0"
 lefthook = "latest"
 node = "latest"
+oxfmt = "latest"
 rust = "latest"
 
 [hooks]
